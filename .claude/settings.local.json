@@ -17,7 +17,10 @@
       "WebFetch(domain:diysolarforum.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(where:*)"
     ]
   }
 }
