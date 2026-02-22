@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(timeout 15 node:*)",
+      "Bash(node -e:*)",
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:www.elprisetjustnu.se)",
+      "WebFetch(domain:github.com)",
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:api.awattar.de)",
+      "WebFetch(domain:springfall2008.github.io)",
+      "WebFetch(domain:knowledge-center.solaredge.com)",
+      "WebFetch(domain:www.home-assistant.io)",
+      "WebFetch(domain:community.home-assistant.io)",
+      "WebFetch(domain:diysolarforum.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
