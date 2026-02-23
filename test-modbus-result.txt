@@ -1,0 +1,34 @@
+Connecting to 192.168.1.180:502...
+
+=== SOC Control (holding registers) ===
+
+  ChargeStopSOC (3048):        99%
+  DischargingStopSOC (3067):   10%
+  LoadFirstStopSoc (3310):     20%
+  Holding 800:                 45  (×100W = 4500W, ×0.1kW = 4.5kW)
+  Holding 801:                 40  (×100W = 4000W, ×0.1kW = 4kW)
+
+=== Battery State ===
+
+  BMS SOC (input 3171):        63%
+  SOC mirror (holding 807):    63%
+  Battery current (3170):      -2.3 A (negative = charging)
+  Battery voltage raw (3169):  7241
+
+=== Inverter (Group 1) ===
+
+  Status:           1 (0=waiting, 1=normal, 3=fault)
+  Total PV:         0 W
+  PV1:              0 W (133.7V, 0A)
+  PV2:              0 W (0V, 0A)
+  AC output:        1517.9 W
+  Grid frequency:   50.02 Hz
+  Grid L1:          231.4V, 2.1A
+  Grid L3:          230.1V, 2.2A
+
+=== Energy ===
+
+  Today:            12.4 kWh
+  Total:            8593.2 kWh
+
+Done.

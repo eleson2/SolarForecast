@@ -24,7 +24,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Consumption estimator    | Done        | `src/consumption.js` — yesterday + temp correction |
 | Optimizer engine         | Done        | `src/optimizer.js` — greedy v1, solar-aware pairing + SOC tracking |
 | Battery state tracker    | Done        | Integrated in optimizer (SOC forward pass) |
-| Inverter integration     | Growatt MIN done | See [`inverter-integration.md`](inverter-integration.md) — Growatt driver + dispatcher + scheduler |
+| Inverter integration     | Growatt MIN + MOD done | See [`inverter-integration.md`](inverter-integration.md) — Cloud API + Modbus TCP drivers |
 | Live SOC seeding         | Done        | Optimizer accepts `options.startSoc` from inverter; scheduler + CLI read SOC before each run |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
@@ -523,6 +523,73 @@ Inverter ──getMetrics()──→ consumptionPipeline()
 If the driver doesn't implement `getMetrics()` (`typeof driver.getMetrics !== 'function'`),
 the pipeline is silently skipped. The consumption estimator falls back to flat watts
 from config, as before.
+
+---
+
+## Modbus TCP Steering — SOC Buffer Control
+
+### Overview
+
+The `growatt-modbus` driver (`src/inverters/growatt-modbus.js`) communicates with the
+inverter directly over Modbus TCP on the local network, replacing the cloud API used by
+the `growatt` driver. This provides:
+
+- **Low latency** — <100ms vs 1-5s cloud round-trip
+- **No internet dependency** — works offline
+- **Simple control** — single register write instead of 9 time segments
+
+### How it works
+
+Instead of managing time segments (the cloud API approach), the Modbus driver uses
+**SOC buffer control** via a single holding register:
+
+- **Holding register 3310** (`LoadFirstStopSocSet` / reserved SOC for peak shaving) —
+  the SOC percentage at which the battery stops discharging to the load. The inverter
+  is always in "Load First" mode; this register acts as the discharge floor.
+  (Holding register 808 is a mirror. Growatt V1.24 doc says 3082, which doesn't work.)
+
+The `applySchedule()` function translates optimizer actions to a target SOC value:
+
+| Optimizer action         | SOC target                  | Effect                           |
+|--------------------------|-----------------------------|----------------------------------|
+| `charge_grid` / `charge_solar` | `charge_soc` (default 95%) | High floor → battery charges     |
+| `discharge` / `sell`     | `discharge_soc` (default 13%) | Low floor → battery discharges |
+| `idle`                   | Current SOC                 | Holds current level              |
+
+This runs every 15 minutes (via `executePipeline` in the scheduler), so the SOC floor
+is continuously adjusted to match the current optimizer slot.
+
+### Telemetry
+
+The driver reads telemetry from three input register groups:
+
+1. **Input registers 0–52** — Group 1: PV power, AC output, grid voltage/frequency
+2. **Input registers 3021–3022** — Grid import power (one of the few working storage registers)
+3. **Input registers 3169–3171** — BMS: battery voltage, current, SOC
+
+Note: most storage input registers (3000–3040) return zeros on this datalogger.
+Battery data comes from the BMS range (3169+) instead of the documented 3009–3014.
+
+### Configuration
+
+```javascript
+inverter: {
+    brand: 'growatt-modbus',
+    host: '192.168.1.XXX',     // datalogger IP on local network
+    port: 502,                  // Modbus TCP port
+    unit_id: 1,                 // Modbus slave address
+    dry_run: true,              // true = log only, false = write registers
+    charge_soc: 95,             // SOC target for charge actions
+    discharge_soc: 13,          // SOC floor for discharge actions
+},
+```
+
+Set `dry_run: true` initially. When logs confirm correct behavior, switch to `false`.
+
+### Connection management
+
+The driver maintains a lazy singleton TCP connection with automatic reconnect.
+A 1-second throttle between Modbus commands prevents overwhelming the datalogger.
 
 ---
 

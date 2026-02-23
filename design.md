@@ -8,7 +8,7 @@ This project has two parts:
    Open source, useful to anyone with solar panels. **Done.**
 2. **Battery Optimizer** ([battery-optimizer.md](battery-optimizer.md)) — use solar forecast +
    electricity prices to plan when to charge, discharge, or sell battery capacity.
-   **Implemented** — greedy optimizer, price fetcher, consumption estimator, inverter control (Growatt).
+   **Implemented** — greedy optimizer, price fetcher, consumption estimator, inverter control (Growatt cloud API + Modbus TCP).
 
 ## Overview
 
@@ -40,6 +40,7 @@ Battery charge/discharge optimization is handled by the Battery Optimizer module
 | `run-once.js`      | Done        | One-shot pipeline, writes `data/forecast.json`     |
 | Fallback strategy  | Not started | Use previous irradiance when API is unavailable    |
 | Actuals ingestion  | Done        | `getMetrics()` reads solar_w from inverter hourly, writes to `prod_actual` |
+| Modbus TCP driver  | Done        | `growatt-modbus` — local Modbus TCP for MOD TL3-XH, SOC buffer control |
 
 ---
 
@@ -72,7 +73,7 @@ solar-forecast/
 │   ├── optimizer.js      # Battery charge/discharge optimizer (greedy v1)
 │   ├── price-fetcher.js  # Pluggable price provider dispatcher
 │   ├── prices/           # Price providers (elprisetjust, awattar)
-│   ├── inverters/        # Pluggable inverter drivers (growatt, …)
+│   ├── inverters/        # Pluggable inverter drivers (growatt cloud, growatt-modbus, …)
 │   ├── inverter-dispatcher.js  # Driver selection based on config.inverter.brand
 │   ├── battery-api.js    # GET /battery/schedule endpoint
 │   ├── db.js             # DB connection, schema init, all queries
@@ -347,6 +348,7 @@ Every 15 min      → executePipeline  (push schedule to inverter hardware)
 | Weather source  | Open-Meteo (free, no API key) |
 | HTTP API        | Express                       |
 | Scheduling      | `node-cron`                   |
+| Modbus TCP      | `modbus-serial` (local inverter communication) |
 
 ---
 

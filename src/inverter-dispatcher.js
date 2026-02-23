@@ -7,8 +7,9 @@
 
 import config from '../config.js';
 import * as growatt from './inverters/growatt.js';
+import * as growattModbus from './inverters/growatt-modbus.js';
 
-const drivers = { growatt };
+const drivers = { growatt, 'growatt-modbus': growattModbus };
 
 /**
  * @returns {{ getState: Function, applySchedule: Function, resetToDefault: Function } | null}

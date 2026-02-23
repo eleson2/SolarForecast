@@ -40,12 +40,27 @@ export default {
         flat_watts: 800,
     },
     inverter: {
-        brand: 'growatt',                         // driver name — matches src/inverters/<brand>.js
-        server: 'https://openapi.growatt.com/',   // EU; use -us or -cn for other regions
-        token: '',                                // Growatt OpenAPI V1 token
-        device_sn: '',                            // MIN inverter serial number
-        poll_interval_s: 30,
-        failsafe_mode: 'load_first',
+        // Driver: 'growatt' = cloud API (MIN/MIX), 'growatt-modbus' = local Modbus TCP (MOD TL3-XH)
+        brand: 'growatt-modbus',
+
+        // --- Growatt MOD TL3-XH Modbus TCP settings ---
+        model: 'MOD TL3-XH',                     // informational — inverter model
+        host: '192.168.1.180',                    // datalogger IP on local network
+        port: 502,                                // Modbus TCP port (standard)
+        unit_id: 1,                               // Modbus slave address (holding reg 30)
+        timeout_ms: 5000,                         // Modbus response timeout
+        dry_run: true,                            // true = log only, false = write registers
+
+        // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
+        // Inverter stays in load-first mode; this register sets the discharge floor.
+        charge_soc: 95,                           // SOC floor when charging (high = battery fills up)
+        discharge_soc: 13,                        // SOC floor when discharging (low = battery empties)
+        //                                        // 13% is the MOD TL3-XH minimum allowed value
+
+        // --- Growatt cloud API settings (used when brand = 'growatt') ---
+        // server: 'https://openapi.growatt.com/',
+        // token: '',
+        // device_sn: '',
     },
     price: {
         source: 'elprisetjust',     // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)

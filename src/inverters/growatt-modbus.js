@@ -1,0 +1,235 @@
+/**
+ * Growatt MOD TL3-XH Modbus TCP driver.
+ *
+ * Reads telemetry and steers battery via local Modbus TCP instead of cloud API.
+ * Uses SOC buffer control — writes a single register (LoadFirstStopSocSet)
+ * rather than managing time segments.
+ *
+ * Same interface as growatt.js:
+ *   getState(cfg), getMetrics(cfg), applySchedule(slots, cfg), resetToDefault(cfg)
+ *
+ * Register map (verified empirically — differs from Growatt protocol V1.24 doc):
+ *   - LoadFirstStopSocSet: holding 3310 (confirmed as "reserved SOC for peak shaving"; 808 is a mirror)
+ *   - Battery SOC:         input 3171 (BMS range; doc's input 3014 returns 0)
+ *   - Battery current:     input 3170 (BMS, signed 0.1A; negative = charging)
+ *   - PV power:            input 1-2 (Group 1, 0.1W, 32-bit) — works as documented
+ *   - Grid frequency:      input 37 (0.01Hz) — works as documented
+ *   - Grid voltage:        input 38 (0.1V) — works as documented
+ *   - Storage 3000+ input registers for battery power/voltage return zeros on this datalogger
+ */
+
+import ModbusRTU from 'modbus-serial';
+
+// --- Register addresses (empirically verified) ---
+
+const REG = {
+  // Holding registers (writable)
+  LOAD_FIRST_STOP_SOC: 3310,    // Peak shaving reserve — battery stops discharging to load at this SOC
+  CHARGE_STOP_SOC:     3048,    // Upper limit — battery stops charging at this SOC
+  DISCHARGE_STOP_SOC:  3067,    // Absolute floor — battery never goes below this SOC
+
+  // Input registers — Group 1 (inverter)
+  PV_POWER_H:          1,       // Total PV power high word (0.1W)
+  PV_POWER_L:          2,       // Total PV power low word
+
+  // Input registers — BMS (battery)
+  BMS_VOLTAGE:         3169,    // Battery voltage
+  BMS_CURRENT:         3170,    // Battery current (signed, 0.1A; negative = charging)
+  BMS_SOC:             3171,    // State of charge (0–100%)
+};
+
+// --- Work mode lookup ---
+
+// MOD TL3-XH system work modes (input register 0)
+const WORK_MODES = {
+  0: 'waiting',
+  1: 'normal',
+  3: 'fault',
+  4: 'flash',
+  5: 'pv_bat_online',      // normal: PV + battery, grid-tied
+  6: 'bat_online',          // normal: battery only, grid-tied
+  7: 'pv_offline',          // PV, off-grid/EPS
+  8: 'bat_offline',         // battery, off-grid/EPS
+};
+
+// --- Action → SOC intent mapping ---
+
+const ACTION_TO_SOC_INTENT = {
+  charge_grid:  'charge',
+  charge_solar: 'charge',
+  discharge:    'discharge',
+  sell:         'discharge',
+  idle:         'idle',
+};
+
+// --- Connection management ---
+
+let client = null;
+let lastCmd = 0;
+
+async function getConnection(cfg) {
+  if (client?.isOpen) return client;
+  client = new ModbusRTU();
+  await client.connectTCP(cfg.host, { port: cfg.port || 502 });
+  client.setID(cfg.unit_id || 1);
+  client.setTimeout(cfg.timeout_ms || 5000);
+  return client;
+}
+
+async function throttle() {
+  const now = Date.now();
+  const wait = Math.max(0, 1000 - (now - lastCmd));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastCmd = Date.now();
+}
+
+// --- Driver interface ---
+
+/**
+ * Read current battery state from inverter via Modbus TCP.
+ * Uses BMS registers for SOC/current (storage group 3000+ returns zeros on this datalogger).
+ * @param {object} cfg — inverter config from config.js
+ * @returns {Promise<{ soc: number, power_w: number, mode: string }>}
+ */
+export async function getState(cfg) {
+  const conn = await getConnection(cfg);
+
+  // Read inverter status (input reg 0)
+  await throttle();
+  const status = await conn.readInputRegisters(0, 1);
+  const modeCode = status.data[0];
+  const mode = WORK_MODES[modeCode] || `unknown(${modeCode})`;
+
+  // Read BMS: voltage, current, SOC (input regs 3169–3171)
+  await throttle();
+  const bms = await conn.readInputRegisters(REG.BMS_VOLTAGE, 3);
+  const soc = bms.data[2];                          // reg 3171
+  const currentA = signed16(bms.data[1]) / 10;      // reg 3170, signed 0.1A
+  const voltageRaw = bms.data[0];                    // reg 3169
+  // Estimate power from voltage × current (sign: positive = discharging)
+  const power_w = -(voltageRaw * currentA / 10);     // scale TBD, rough estimate
+
+  return { soc, power_w, mode };
+}
+
+/**
+ * Read extended telemetry from inverter via Modbus TCP.
+ *
+ * Sources:
+ *   - Group 1 (input 0–52): PV power, AC output, grid voltage/current/frequency
+ *   - BMS (input 3169–3171): battery SOC and current
+ *   - Grid import: input 3021-3022 (storage range — one of the few that works)
+ *
+ * Note: most storage input registers (3009–3014, 3029–3038) return zeros or
+ * garbage on this datalogger. Grid import (3021-3022) is the exception.
+ *
+ * @param {object} cfg — inverter config from config.js
+ * @returns {Promise<{ soc: number, battery_w: number, grid_import_w: number, grid_export_w: number, solar_w: number, consumption_w: number }>}
+ */
+export async function getMetrics(cfg) {
+  const conn = await getConnection(cfg);
+
+  // Read Group 1: PV power + AC output (input regs 0–52)
+  await throttle();
+  const g1 = await conn.readInputRegisters(0, 53);
+  const solar_w = u32(g1.data, 1) / 10;         // regs 1-2: total PV (0.1W)
+  const ac_output_w = u32(g1.data, 35) / 10;    // regs 35-36: total AC output (0.1W)
+
+  // Read BMS: voltage, current, SOC (input regs 3169–3171)
+  await throttle();
+  const bms = await conn.readInputRegisters(REG.BMS_VOLTAGE, 3);
+  const soc = bms.data[2];                        // reg 3171
+  const battCurrentA = signed16(bms.data[1]) / 10; // reg 3170, negative = charging
+
+  // Read grid import from storage range (input regs 3021-3022 — verified working)
+  await throttle();
+  const gridData = await conn.readInputRegisters(3021, 2);
+  const grid_import_w = u32(gridData.data, 0) / 10;
+
+  // Derive battery power: AC output - PV = battery contribution (+ grid)
+  // Positive = discharging, negative = charging
+  const battery_w = ac_output_w - solar_w - grid_import_w;
+
+  // Grid export: when AC output > consumption, excess goes to grid
+  // We can't read it directly, so derive from energy balance
+  const grid_export_w = Math.max(0, -grid_import_w);  // TODO: find correct register
+
+  // Consumption = what the house actually uses
+  const consumption_w = Math.max(0, solar_w + grid_import_w + Math.max(0, -battery_w));
+
+  return { soc, battery_w, grid_import_w, grid_export_w, solar_w, consumption_w };
+}
+
+/**
+ * Translate optimizer schedule to a single SOC buffer register write.
+ *
+ * Finds the current slot, maps its action to a target SOC value, and writes
+ * holding register 808 (LoadFirstStopSocSet).
+ *
+ * @param {Array<{ slot_ts: string, action: string }>} slots
+ * @param {object} cfg — inverter config
+ * @returns {Promise<{ applied: number, skipped: number }>}
+ */
+export async function applySchedule(slots, cfg) {
+  if (!slots.length) return { applied: 0, skipped: 0 };
+
+  // Find current slot (latest slot whose timestamp is <= now)
+  const now = new Date().toISOString().slice(0, 16);
+  const currentSlot = [...slots]
+    .filter(s => s.slot_ts <= now)
+    .sort((a, b) => b.slot_ts.localeCompare(a.slot_ts))[0]
+    ?? slots[0]; // fallback to first
+
+  const intent = ACTION_TO_SOC_INTENT[currentSlot.action] ?? 'idle';
+  let targetSoc;
+
+  if (intent === 'charge') {
+    targetSoc = cfg.charge_soc ?? 95;
+  } else if (intent === 'discharge') {
+    targetSoc = cfg.discharge_soc ?? 13;
+  } else {
+    // idle: read current SOC and hold there
+    const state = await getState(cfg);
+    targetSoc = state.soc;
+  }
+
+  targetSoc = Math.max(13, Math.min(100, targetSoc));
+
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
+    return { applied: 1, skipped: 0 };
+  }
+
+  const conn = await getConnection(cfg);
+  await throttle();
+  await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, targetSoc);
+  console.log(`[growatt-modbus] Set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
+
+  return { applied: 1, skipped: 0 };
+}
+
+/**
+ * Reset SOC floor back to a safe default (min_soc from config).
+ * @param {object} cfg — inverter config
+ */
+export async function resetToDefault(cfg) {
+  const defaultSoc = cfg.discharge_soc ?? 13;
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would reset LoadFirstStopSoc=${defaultSoc}%`);
+    return;
+  }
+  const conn = await getConnection(cfg);
+  await throttle();
+  await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, defaultSoc);
+  console.log(`[growatt-modbus] Reset LoadFirstStopSoc=${defaultSoc}%`);
+}
+
+// --- Helpers ---
+
+function u32(buf, offset) {
+  return ((buf[offset] << 16) | buf[offset + 1]) >>> 0;
+}
+
+function signed16(val) {
+  return val > 32767 ? val - 65536 : val;
+}

@@ -1,0 +1,38 @@
+Key Modbus Registers (Holding/Input) 
+1. Real-time Monitoring (Input Registers) 
+These registers are commonly used for reading current status. 
+Register (Hex) 	Description	Units/Scale
+3000-3024	General System Data	Various
+3000	Status	(0: waiting, 1: checking, 3: normal, 4: fault)
+3001	PV1 Voltage	0.1V
+3003	PV2 Voltage	0.1V
+3005	Total Active Power (Combined 3005/3006)	0.1W
+3013	Grid Frequency	0.01Hz
+3014-3016	Grid Voltage (L1, L2, L3)	0.1V
+3017-3019	Grid Current (L1, L2, L3)	0.1A
+3020	PV Power	0.1W
+3021-3023	Output Active Power (L1, L2, L3)	0.1W
+3024	Reactive Power	0.1var
+3025-3026	Total Energy Export to Grid	0.1kWh
+3027-3028	Total Energy Import from Grid	0.1kWh
+3029-3030	Today Generation Energy	0.1kWh
+3031-3032	Total Generation Energy	0.1kWh
+2. APX Battery Specific Data (Storage/Hybrid Type) 
+These are typically available in the higher register ranges for MOD TL3-XH. 
+Symcon Community
+Symcon Community
+Register (Dec) 	Description	Units/Scale
+1000	Battery Status	(0: standby, 1: discharge, 2: charge)
+1001	Battery Percentage (SOC)	0.1%
+1002	Battery Voltage	0.1V
+1003	Battery Power (Discharge/Charge)	0.1W (Signed)
+1004	Battery SOC	0.1% (Same as 1001)
+1005	Battery Current	0.1A (Signed)
+1006	Battery Temperature	0.1°C
+1007	Battery SoH (Health)	0.1%
+3. Configuration & Control (Holding Registers)
+Register (Dec) 	Description	Allowed Values/Notes
+22	Baud Rate Set	0: 9600, 1: 19200
+100	Inverter On/Off	0: Off, 1: On
+300	Maximum Active Power	0-100%
+400	Battery Charge Priority	Time slot settings (1, 2, 3)
