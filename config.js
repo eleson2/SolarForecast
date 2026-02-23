@@ -50,6 +50,7 @@ export default {
         unit_id: 1,                               // Modbus slave address (holding reg 30)
         timeout_ms: 5000,                         // Modbus response timeout
         dry_run: true,                            // true = log only, false = write registers
+        data_collection_only: true,               // true = collect data only, never dispatch schedule to inverter
 
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.

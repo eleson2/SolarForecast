@@ -1,5 +1,5 @@
 import config from '../config.js';
-import { getReadingsWithoutForecast, getCorrectionCell, updateForecast } from './db.js';
+import { getReadingsWithoutForecast, getCorrectionCell, updateForecast, getLastActualForHour } from './db.js';
 import { parseTs } from './timeutils.js';
 
 /**
@@ -35,11 +35,24 @@ export function runModel() {
     const matrixCorrection = cell ? cell.correction_avg : 1.0;
     const sampleCount = cell ? cell.sample_count : 0;
 
-    // Blend empirical vs geometry based on observation count
+    // Blend empirical vs fallback based on observation count
     const empiricalWeight = Math.min(1.0, sampleCount / config.learning.empirical_blend_threshold);
-    const geoCorrection = geometryCorrection(month, hour);
+
+    // When matrix has no data, try to seed from the most recent actual for this hour.
+    // Back-calculate an implied correction: actual / (peak_kw × irr/1000)
+    let fallbackCorrection = geometryCorrection(month, hour);
+    if (sampleCount === 0) {
+      const lastActual = getLastActualForHour(hour);
+      if (lastActual && lastActual.irr_forecast > 0) {
+        const implied = lastActual.prod_actual / (config.panel.peak_kw * (lastActual.irr_forecast / 1000));
+        if (implied > 0 && implied < 10) { // sanity bounds
+          fallbackCorrection = implied;
+        }
+      }
+    }
+
     const correction = (empiricalWeight * matrixCorrection)
-                     + ((1 - empiricalWeight) * geoCorrection);
+                     + ((1 - empiricalWeight) * fallbackCorrection);
 
     // Core formula: prod_forecast = peak_kw × (irr_forecast / 1000) × correction
     const prodForecast = config.panel.peak_kw * (row.irr_forecast / 1000) * correction;

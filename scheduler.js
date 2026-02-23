@@ -7,7 +7,7 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer } from './src/optimizer.js';
-import { getScheduleForRange, upsertConsumption, updateActual } from './src/db.js';
+import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import config from './config.js';
 import app from './src/api.js';
@@ -90,48 +90,105 @@ async function batteryPipeline() {
   }
 }
 
-// --- Consumption collection pipeline ---
+// --- Energy snapshot pipeline (every 15 min) ---
+// Reads daily cumulative energy totals from inverter and stores a timestamped snapshot.
+// These snapshots are later used by consumptionPipeline to derive hourly deltas.
 
-async function consumptionPipeline() {
+async function snapshotPipeline() {
   const driver = getDriver();
-  if (!driver || typeof driver.getMetrics !== 'function') return;
+  if (!driver || typeof driver.getEnergyTotals !== 'function') return;
 
   const cfg = getDriverConfig();
   try {
-    console.log('[scheduler] Collecting consumption from inverter...');
-    const metrics = await driver.getMetrics(cfg);
-
-    // Fetch current outdoor temperature from Open-Meteo
-    let outdoorTemp = null;
-    try {
-      const { lat, lon } = config.location;
-      const url = `https://api.open-meteo.com/v1/forecast`
-        + `?latitude=${lat}&longitude=${lon}`
-        + `&current=temperature_2m`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        outdoorTemp = data.current?.temperature_2m ?? null;
-      }
-    } catch (err) {
-      console.log(`[scheduler] Could not fetch outdoor temp: ${err.message}`);
-    }
-
-    // Round to current hour
-    const now = new Date();
-    const hourDate = new Date(now);
-    hourDate.setMinutes(0, 0, 0);
-    const hourTs = localTs(hourDate);
-
-    upsertConsumption(hourTs, metrics.consumption_w, outdoorTemp, 'inverter');
-
-    // Write actual solar production to solar_readings — closes the learning loop
-    // prod_actual is stored in kW (matching prod_forecast), getMetrics returns watts
-    updateActual(hourTs, metrics.solar_w / 1000);
-
-    console.log(`[scheduler] Telemetry stored at ${hourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W (temp: ${outdoorTemp}°C)`);
+    const totals = await driver.getEnergyTotals(cfg);
+    const snapshotTs = localTs(new Date());
+    upsertEnergySnapshot(
+      snapshotTs,
+      totals.pv_today_kwh,
+      totals.load_today_kwh,
+      totals.grid_import_today_kwh,
+      totals.grid_export_today_kwh,
+    );
+    console.log(`[scheduler] Energy snapshot at ${snapshotTs}: PV=${totals.pv_today_kwh}kWh load=${totals.load_today_kwh}kWh grid_in=${totals.grid_import_today_kwh}kWh`);
   } catch (err) {
-    console.error('[scheduler] Consumption collection error:', err.message);
+    console.error('[scheduler] Snapshot pipeline error:', err.message);
+  }
+}
+
+// --- Consumption collection pipeline (hourly) ---
+// Derives last hour's energy consumption and PV production from the delta between
+// the snapshot at the current hour start and the snapshot one hour prior.
+
+async function consumptionPipeline() {
+  const driver = getDriver();
+  if (!driver) return;
+
+  const cfg = getDriverConfig();
+
+  // Fetch current outdoor temperature from Open-Meteo
+  let outdoorTemp = null;
+  try {
+    const { lat, lon } = config.location;
+    const url = `https://api.open-meteo.com/v1/forecast`
+      + `?latitude=${lat}&longitude=${lon}`
+      + `&current=temperature_2m`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      outdoorTemp = data.current?.temperature_2m ?? null;
+    }
+  } catch (err) {
+    console.log(`[scheduler] Could not fetch outdoor temp: ${err.message}`);
+  }
+
+  // Derive last hour's energy from snapshots
+  // At HH:05 we compare snapshot at HH:00 vs (HH-1):00
+  const now = new Date();
+  const currentHour = new Date(now);
+  currentHour.setMinutes(0, 0, 0);
+  const prevHour = new Date(currentHour.getTime() - 60 * 60 * 1000);
+
+  const currentHourTs = localTs(currentHour);
+  const prevHourTs    = localTs(prevHour);
+
+  try {
+    const snapNow  = getSnapshotAtOrBefore(currentHourTs);
+    const snapPrev = getSnapshotAtOrBefore(prevHourTs);
+
+    if (snapNow && snapPrev) {
+      // Compute deltas; handle midnight reset (daily counter drops back to 0)
+      const deltaLoad = snapNow.load_today_kwh >= snapPrev.load_today_kwh
+        ? snapNow.load_today_kwh - snapPrev.load_today_kwh
+        : snapNow.load_today_kwh;  // counter reset — value since midnight is the new reading
+
+      const deltaPv = snapNow.pv_today_kwh >= snapPrev.pv_today_kwh
+        ? snapNow.pv_today_kwh - snapPrev.pv_today_kwh
+        : snapNow.pv_today_kwh;
+
+      // kWh over 1 hour = average kW = average W × 1000
+      const consumption_w = deltaLoad * 1000;
+      upsertConsumption(prevHourTs, consumption_w, outdoorTemp, 'inverter_delta');
+
+      // prod_actual stored in kW (matches prod_forecast units)
+      updateActual(prevHourTs, deltaPv);
+
+      console.log(`[scheduler] Hourly delta for ${prevHourTs}: load=${deltaLoad.toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh (temp: ${outdoorTemp}°C)`);
+      return;
+    }
+  } catch (err) {
+    console.error('[scheduler] Consumption delta error:', err.message);
+  }
+
+  // Fallback: no snapshots available — use instantaneous reading
+  if (typeof driver.getMetrics !== 'function') return;
+  try {
+    console.log('[scheduler] No energy snapshots available, falling back to instantaneous reading');
+    const metrics = await driver.getMetrics(cfg);
+    upsertConsumption(currentHourTs, metrics.consumption_w, outdoorTemp, 'inverter_instant');
+    updateActual(currentHourTs, metrics.solar_w / 1000);
+    console.log(`[scheduler] Instantaneous fallback at ${currentHourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W`);
+  } catch (err) {
+    console.error('[scheduler] Consumption fallback error:', err.message);
   }
 }
 
@@ -218,9 +275,12 @@ cron.schedule('5 * * * *', () => {
   consumptionPipeline();
 });
 
-// Every 15 min: push schedule to inverter
+// Every 15 min: snapshot energy totals + (unless data_collection_only) push schedule to inverter
 cron.schedule('*/15 * * * *', () => {
-  executePipeline();
+  snapshotPipeline();
+  if (!config.inverter.data_collection_only) {
+    executePipeline();
+  }
 });
 
 // --- Start server ---
@@ -233,5 +293,8 @@ app.listen(PORT, () => {
 // Run initial pipelines on startup
 fetchPipeline();
 batteryPipeline();
+snapshotPipeline();
 consumptionPipeline();
-executePipeline();
+if (!config.inverter.data_collection_only) {
+  executePipeline();
+}

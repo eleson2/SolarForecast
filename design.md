@@ -39,8 +39,10 @@ Battery charge/discharge optimization is handled by the Battery Optimizer module
 | `scheduler.js`     | Done        | Cron orchestration + Express server                |
 | `run-once.js`      | Done        | One-shot pipeline, writes `data/forecast.json`     |
 | Fallback strategy  | Not started | Use previous irradiance when API is unavailable    |
-| Actuals ingestion  | Done        | `getMetrics()` reads solar_w from inverter hourly, writes to `prod_actual` |
+| Actuals ingestion  | Done        | `snapshotPipeline` polls daily energy totals every 15 min; `consumptionPipeline` derives hourly deltas → `prod_actual` + `consumption_readings` |
 | Modbus TCP driver  | Done        | `growatt-modbus` — local Modbus TCP for MOD TL3-XH, SOC buffer control |
+| Data-collection mode | Done      | `config.inverter.data_collection_only = true` disables inverter dispatch; all data collection continues |
+| Yesterday PV fallback | Done     | `model.js` seeds correction factor from last recorded actual for the same hour when matrix is empty |
 
 ---
 
@@ -265,7 +267,8 @@ The battery optimizer adds three more tables — documented in detail in
 [`battery-optimizer.md`](battery-optimizer.md):
 
 - **`price_readings`** — spot prices at 15-min resolution (slot_ts, spot_price, region)
-- **`consumption_readings`** — hourly household consumption with outdoor temperature (hour_ts, consumption_w, outdoor_temp, source)
+- **`consumption_readings`** — hourly household consumption with outdoor temperature (hour_ts, consumption_w, outdoor_temp, source); `source` is `inverter_delta` when derived from energy snapshots
+- **`energy_snapshots`** — 15-min snapshots of daily cumulative energy totals from inverter (snapshot_ts, pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh)
 - **`battery_schedule`** — optimizer output: 15-min slots with action, watts, SOC tracking, prices
 
 ---
@@ -334,7 +337,8 @@ Every 1 hour :05  → consumptionPipeline (read inverter telemetry → consumpti
 Every 1 hour :30  → batteryPipeline  (fetch prices → estimate consumption → read SOC → optimize)
 Every 24h at 02:00→ smoothPipeline   (re-smooth correction matrix)
 Day-ahead + :15   → batteryPipeline  (re-optimize when tomorrow's prices publish)
-Every 15 min      → executePipeline  (push schedule to inverter hardware)
+Every 15 min      → snapshotPipeline (read daily energy totals → energy_snapshots)
+Every 15 min      → executePipeline  (push schedule to inverter hardware — skipped if data_collection_only)
 ```
 
 ---

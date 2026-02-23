@@ -54,6 +54,14 @@ db.exec(`
     source          TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS energy_snapshots (
+    snapshot_ts           TEXT PRIMARY KEY,
+    pv_today_kwh          REAL,
+    load_today_kwh        REAL,
+    grid_import_today_kwh REAL,
+    grid_export_today_kwh REAL
+  );
+
   CREATE TABLE IF NOT EXISTS battery_schedule (
     slot_ts           DATETIME PRIMARY KEY,
     action            TEXT,
@@ -348,6 +356,63 @@ export function getScheduleForRange(fromTs, toTs) {
 
 export function deleteScheduleForRange(fromTs, toTs) {
   return batteryStmts.deleteScheduleForRange.run(fromTs, toTs);
+}
+
+// --- Energy snapshot helpers (daily cumulative totals → hourly delta consumption) ---
+
+const energyStmts = {
+  upsertSnapshot: db.prepare(`
+    INSERT INTO energy_snapshots (snapshot_ts, pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(snapshot_ts) DO UPDATE SET
+      pv_today_kwh          = excluded.pv_today_kwh,
+      load_today_kwh        = excluded.load_today_kwh,
+      grid_import_today_kwh = excluded.grid_import_today_kwh,
+      grid_export_today_kwh = excluded.grid_export_today_kwh
+  `),
+
+  // Get the most recent snapshot at or before a given timestamp
+  getSnapshotAtOrBefore: db.prepare(`
+    SELECT * FROM energy_snapshots
+    WHERE snapshot_ts <= ?
+    ORDER BY snapshot_ts DESC
+    LIMIT 1
+  `),
+
+  getSnapshotsForRange: db.prepare(`
+    SELECT * FROM energy_snapshots
+    WHERE snapshot_ts >= ? AND snapshot_ts <= ?
+    ORDER BY snapshot_ts
+  `),
+
+  // Most recent prod_actual + irr_forecast for a given hour-of-day (for model fallback)
+  getLastActualForHour: db.prepare(`
+    SELECT prod_actual, irr_forecast
+    FROM solar_readings
+    WHERE strftime('%H', hour_ts) = ?
+      AND prod_actual IS NOT NULL
+      AND irr_forecast IS NOT NULL
+      AND irr_forecast > 0
+    ORDER BY hour_ts DESC
+    LIMIT 1
+  `),
+};
+
+export function upsertEnergySnapshot(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh) {
+  return energyStmts.upsertSnapshot.run(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh);
+}
+
+export function getSnapshotAtOrBefore(ts) {
+  return energyStmts.getSnapshotAtOrBefore.get(ts);
+}
+
+export function getSnapshotsForRange(fromTs, toTs) {
+  return energyStmts.getSnapshotsForRange.all(fromTs, toTs);
+}
+
+export function getLastActualForHour(hourOfDay) {
+  const hStr = String(hourOfDay).padStart(2, '0');
+  return energyStmts.getLastActualForHour.get(hStr);
 }
 
 export default db;

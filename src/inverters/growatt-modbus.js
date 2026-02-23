@@ -36,6 +36,18 @@ const REG = {
   BMS_VOLTAGE:         3169,    // Battery voltage
   BMS_CURRENT:         3170,    // Battery current (signed, 0.1A; negative = charging)
   BMS_SOC:             3171,    // State of charge (0–100%)
+
+  // Input registers — daily energy totals (0.1 kWh, reset at midnight)
+  // Read as 40-register block starting at 3045
+  ENERGY_BLOCK_START:  3045,    // Start of energy block read
+  ENERGY_BLOCK_COUNT:  40,      // Covers 3045–3084
+  // Offsets within the block (reg - 3045):
+  //   0/1  → 3045/3046: load power H/L (0.1W)
+  //   4/5  → 3049/3050: AC gen today H/L (0.1 kWh)
+  //  22/23 → 3067/3068: grid import today H/L (0.1 kWh)
+  //  26/27 → 3071/3072: grid export today H/L (0.1 kWh)
+  //  30/31 → 3075/3076: load energy today H/L (0.1 kWh)
+  //  38/39 → 3083/3084: PV energy today H/L (0.1 kWh)
 };
 
 // --- Work mode lookup ---
@@ -129,35 +141,62 @@ export async function getState(cfg) {
 export async function getMetrics(cfg) {
   const conn = await getConnection(cfg);
 
-  // Read Group 1: PV power + AC output (input regs 0–52)
+  // Read Group 1: PV power (input regs 0–10, only need regs 1-2)
   await throttle();
-  const g1 = await conn.readInputRegisters(0, 53);
+  const g1 = await conn.readInputRegisters(0, 11);
   const solar_w = u32(g1.data, 1) / 10;         // regs 1-2: total PV (0.1W)
-  const ac_output_w = u32(g1.data, 35) / 10;    // regs 35-36: total AC output (0.1W)
 
   // Read BMS: voltage, current, SOC (input regs 3169–3171)
   await throttle();
   const bms = await conn.readInputRegisters(REG.BMS_VOLTAGE, 3);
-  const soc = bms.data[2];                        // reg 3171
-  const battCurrentA = signed16(bms.data[1]) / 10; // reg 3170, negative = charging
+  const soc = bms.data[2];                          // reg 3171
+  const battCurrentA = signed16(bms.data[1]) / 10;  // reg 3170, negative = charging
 
-  // Read grid import from storage range (input regs 3021-3022 — verified working)
+  // Read energy block: load power + daily totals (input regs 3045–3084)
+  await throttle();
+  const eb = await conn.readInputRegisters(REG.ENERGY_BLOCK_START, REG.ENERGY_BLOCK_COUNT);
+
+  // Instantaneous load power (regs 3045/3046, 0.1W) — verified working
+  const consumption_w = u32(eb.data, 0) / 10;
+
+  // Grid import from storage range (input regs 3021-3022 — verified working)
   await throttle();
   const gridData = await conn.readInputRegisters(3021, 2);
   const grid_import_w = u32(gridData.data, 0) / 10;
 
-  // Derive battery power: AC output - PV = battery contribution (+ grid)
-  // Positive = discharging, negative = charging
-  const battery_w = ac_output_w - solar_w - grid_import_w;
+  // Battery power derived from energy balance
+  const battery_w = Math.max(0, consumption_w) - solar_w - grid_import_w;
 
-  // Grid export: when AC output > consumption, excess goes to grid
-  // We can't read it directly, so derive from energy balance
-  const grid_export_w = Math.max(0, -grid_import_w);  // TODO: find correct register
+  // Grid export: not directly readable, derive from balance
+  const grid_export_w = Math.max(0, solar_w - consumption_w - Math.max(0, -battery_w));
 
-  // Consumption = what the house actually uses
-  const consumption_w = Math.max(0, solar_w + grid_import_w + Math.max(0, -battery_w));
+  // Daily energy totals (0.1 kWh scale)
+  const pv_today_kwh          = u32(eb.data, 38) / 10;  // regs 3083/3084
+  const load_today_kwh        = u32(eb.data, 30) / 10;  // regs 3075/3076
+  const grid_import_today_kwh = u32(eb.data, 22) / 10;  // regs 3067/3068
+  const grid_export_today_kwh = u32(eb.data, 26) / 10;  // regs 3071/3072
 
-  return { soc, battery_w, grid_import_w, grid_export_w, solar_w, consumption_w };
+  return {
+    soc, battery_w, grid_import_w, grid_export_w, solar_w, consumption_w,
+    pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh,
+  };
+}
+
+/**
+ * Read only the daily cumulative energy totals (no BMS, no grid import).
+ * Lightweight — used by snapshotPipeline every 15 min.
+ * @returns {Promise<{ pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh }>}
+ */
+export async function getEnergyTotals(cfg) {
+  const conn = await getConnection(cfg);
+  await throttle();
+  const eb = await conn.readInputRegisters(REG.ENERGY_BLOCK_START, REG.ENERGY_BLOCK_COUNT);
+  return {
+    pv_today_kwh:          u32(eb.data, 38) / 10,  // regs 3083/3084
+    load_today_kwh:        u32(eb.data, 30) / 10,  // regs 3075/3076
+    grid_import_today_kwh: u32(eb.data, 22) / 10,  // regs 3067/3068
+    grid_export_today_kwh: u32(eb.data, 26) / 10,  // regs 3071/3072
+  };
 }
 
 /**
