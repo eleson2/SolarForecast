@@ -76,13 +76,36 @@ const ACTION_TO_SOC_INTENT = {
 
 // --- Connection management ---
 
+const CONNECT_TIMEOUT_MS = 10_000;  // TCP handshake limit
+const CMD_INTERVAL_MS    = 1_000;   // min gap between Modbus commands
+
 let client = null;
 let lastCmd = 0;
 
+function timeout(ms, label) {
+  return new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  );
+}
+
+function destroyClient() {
+  try { client?.close?.(); } catch (_) {}
+  client = null;
+}
+
 async function getConnection(cfg) {
   if (client?.isOpen) return client;
+  destroyClient();
   client = new ModbusRTU();
-  await client.connectTCP(cfg.host, { port: cfg.port || 502 });
+  try {
+    await Promise.race([
+      client.connectTCP(cfg.host, { port: cfg.port || 502 }),
+      timeout(CONNECT_TIMEOUT_MS, `TCP connect to ${cfg.host}`),
+    ]);
+  } catch (err) {
+    destroyClient();
+    throw err;
+  }
   client.setID(cfg.unit_id || 1);
   client.setTimeout(cfg.timeout_ms || 5000);
   return client;
@@ -90,9 +113,20 @@ async function getConnection(cfg) {
 
 async function throttle() {
   const now = Date.now();
-  const wait = Math.max(0, 1000 - (now - lastCmd));
+  const wait = Math.max(0, CMD_INTERVAL_MS - (now - lastCmd));
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastCmd = Date.now();
+}
+
+// Wrap any driver call so a hung/failed read destroys the client,
+// forcing a fresh TCP connection on the next invocation.
+async function withReconnect(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    destroyClient();
+    throw err;
+  }
 }
 
 // --- Driver interface ---
@@ -104,6 +138,7 @@ async function throttle() {
  * @returns {Promise<{ soc: number, power_w: number, mode: string }>}
  */
 export async function getState(cfg) {
+  return withReconnect(async () => {
   const conn = await getConnection(cfg);
 
   // Read inverter status (input reg 0)
@@ -122,6 +157,7 @@ export async function getState(cfg) {
   const power_w = -(voltageRaw * currentA / 10);     // scale TBD, rough estimate
 
   return { soc, power_w, mode };
+  }); // withReconnect
 }
 
 /**
@@ -139,6 +175,7 @@ export async function getState(cfg) {
  * @returns {Promise<{ soc: number, battery_w: number, grid_import_w: number, grid_export_w: number, solar_w: number, consumption_w: number }>}
  */
 export async function getMetrics(cfg) {
+  return withReconnect(async () => {
   const conn = await getConnection(cfg);
 
   // Read Group 1: PV power (input regs 0–10, only need regs 1-2)
@@ -180,6 +217,7 @@ export async function getMetrics(cfg) {
     soc, battery_w, grid_import_w, grid_export_w, solar_w, consumption_w,
     pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh,
   };
+  }); // withReconnect
 }
 
 /**
@@ -188,6 +226,7 @@ export async function getMetrics(cfg) {
  * @returns {Promise<{ pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh }>}
  */
 export async function getEnergyTotals(cfg) {
+  return withReconnect(async () => {
   const conn = await getConnection(cfg);
   await throttle();
   const eb = await conn.readInputRegisters(REG.ENERGY_BLOCK_START, REG.ENERGY_BLOCK_COUNT);
@@ -197,6 +236,7 @@ export async function getEnergyTotals(cfg) {
     grid_import_today_kwh: u32(eb.data, 22) / 10,  // regs 3067/3068
     grid_export_today_kwh: u32(eb.data, 26) / 10,  // regs 3071/3072
   };
+  }); // withReconnect
 }
 
 /**
@@ -239,12 +279,13 @@ export async function applySchedule(slots, cfg) {
     return { applied: 1, skipped: 0 };
   }
 
-  const conn = await getConnection(cfg);
-  await throttle();
-  await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, targetSoc);
-  console.log(`[growatt-modbus] Set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
-
-  return { applied: 1, skipped: 0 };
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, targetSoc);
+    console.log(`[growatt-modbus] Set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
+    return { applied: 1, skipped: 0 };
+  });
 }
 
 /**
@@ -257,10 +298,12 @@ export async function resetToDefault(cfg) {
     console.log(`[growatt-modbus] DRY-RUN: would reset LoadFirstStopSoc=${defaultSoc}%`);
     return;
   }
-  const conn = await getConnection(cfg);
-  await throttle();
-  await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, defaultSoc);
-  console.log(`[growatt-modbus] Reset LoadFirstStopSoc=${defaultSoc}%`);
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, defaultSoc);
+    console.log(`[growatt-modbus] Reset LoadFirstStopSoc=${defaultSoc}%`);
+  });
 }
 
 // --- Helpers ---

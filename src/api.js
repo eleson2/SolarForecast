@@ -1,7 +1,11 @@
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import config from '../config.js';
-import { getReadingsForForecast } from './db.js';
+import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange } from './db.js';
 import batteryRouter from './battery-api.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
@@ -44,6 +48,38 @@ app.get('/forecast', (req, res) => {
   });
 });
 
+// --- Electricity prices: next 48 hours ---
+app.get('/api/prices', (req, res) => {
+  const now = new Date();
+  const from = new Date(now);
+  from.setMinutes(0, 0, 0);
+  const to = new Date(from.getTime() + 48 * 60 * 60 * 1000);
+  const rows = getPricesForRange(localTs(from), localTs(to));
+  res.json({ timezone: config.location.timezone, prices: rows });
+});
+
+// --- Solar readings: history + forecast in one range ---
+app.get('/api/solar', (req, res) => {
+  const now = new Date();
+  // last 7 days → next 2 days
+  const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  from.setMinutes(0, 0, 0);
+  const to = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+  const rows = getSolarReadingsForRange(localTs(from), localTs(to));
+  res.json({
+    timezone: config.location.timezone,
+    readings: rows.map(r => ({
+      hour: r.hour_ts,
+      irr_wm2: r.irr_forecast,
+      prod_forecast_w: r.prod_forecast != null ? Math.round(r.prod_forecast * 1000) : null,
+      prod_actual_w:   r.prod_actual   != null ? Math.round(r.prod_actual   * 1000) : null,
+    })),
+  });
+});
+
 app.use('/battery', batteryRouter);
+
+// Serve dashboard
+app.use(express.static(path.join(__dirname, '..', 'public')));
 
 export default app;

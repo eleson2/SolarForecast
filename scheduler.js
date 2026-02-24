@@ -11,6 +11,7 @@ import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnaps
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import config from './config.js';
 import app from './src/api.js';
+import log from './src/logger.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -18,13 +19,13 @@ const PORT = process.env.PORT || 3000;
 
 async function fetchPipeline() {
   try {
-    console.log('[scheduler] Starting fetch pipeline...');
+    log.info('fetch', 'Starting fetch pipeline');
     const data = await fetchWeather();
     parseWeatherData(data);
     runModel();
-    console.log('[scheduler] Fetch pipeline complete');
+    log.info('fetch', 'Fetch pipeline complete');
   } catch (err) {
-    console.error('[scheduler] Fetch pipeline error:', err.message);
+    log.error('fetch', 'Fetch pipeline error', err);
   }
 }
 
@@ -32,7 +33,7 @@ function learnPipeline() {
   try {
     runLearner();
   } catch (err) {
-    console.error('[scheduler] Learn pipeline error:', err.message);
+    log.error('learn', 'Learn pipeline error', err);
   }
 }
 
@@ -40,7 +41,7 @@ function smoothPipeline() {
   try {
     runSmoother();
   } catch (err) {
-    console.error('[scheduler] Smooth pipeline error:', err.message);
+    log.error('smooth', 'Smooth pipeline error', err);
   }
 }
 
@@ -58,7 +59,7 @@ function localTs(date) {
 
 async function batteryPipeline() {
   try {
-    console.log('[scheduler] Starting battery optimizer pipeline...');
+    log.info('battery', 'Starting battery optimizer pipeline');
     await fetchPrices();
     const consumption = await estimateConsumption();
 
@@ -77,16 +78,16 @@ async function batteryPipeline() {
       try {
         const state = await driver.getState(getDriverConfig());
         options.startSoc = state.soc;
-        console.log(`[scheduler] Live SOC from inverter: ${state.soc}%`);
+        log.info('battery', `Live SOC from inverter: ${state.soc}%`);
       } catch (err) {
-        console.log(`[scheduler] Could not read inverter SOC: ${err.message}`);
+        log.warn('battery', `Could not read inverter SOC: ${err.message}`);
       }
     }
 
     runOptimizer(fromTs, toTs, consumption, options);
-    console.log('[scheduler] Battery optimizer pipeline complete');
+    log.info('battery', 'Battery optimizer pipeline complete');
   } catch (err) {
-    console.error('[scheduler] Battery optimizer error:', err.message);
+    log.error('battery', 'Battery optimizer error', err);
   }
 }
 
@@ -109,9 +110,9 @@ async function snapshotPipeline() {
       totals.grid_import_today_kwh,
       totals.grid_export_today_kwh,
     );
-    console.log(`[scheduler] Energy snapshot at ${snapshotTs}: PV=${totals.pv_today_kwh}kWh load=${totals.load_today_kwh}kWh grid_in=${totals.grid_import_today_kwh}kWh`);
+    log.info('snapshot', `${snapshotTs}: PV=${totals.pv_today_kwh}kWh load=${totals.load_today_kwh}kWh grid_in=${totals.grid_import_today_kwh}kWh`);
   } catch (err) {
-    console.error('[scheduler] Snapshot pipeline error:', err.message);
+    log.error('snapshot', 'Snapshot pipeline error', err);
   }
 }
 
@@ -138,7 +139,7 @@ async function consumptionPipeline() {
       outdoorTemp = data.current?.temperature_2m ?? null;
     }
   } catch (err) {
-    console.log(`[scheduler] Could not fetch outdoor temp: ${err.message}`);
+    log.warn('consumption', `Could not fetch outdoor temp: ${err.message}`);
   }
 
   // Derive last hour's energy from snapshots
@@ -172,23 +173,23 @@ async function consumptionPipeline() {
       // prod_actual stored in kW (matches prod_forecast units)
       updateActual(prevHourTs, deltaPv);
 
-      console.log(`[scheduler] Hourly delta for ${prevHourTs}: load=${deltaLoad.toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh (temp: ${outdoorTemp}°C)`);
+      log.info('consumption', `${prevHourTs}: load=${deltaLoad.toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
       return;
     }
   } catch (err) {
-    console.error('[scheduler] Consumption delta error:', err.message);
+    log.error('consumption', 'Consumption delta error', err);
   }
 
   // Fallback: no snapshots available — use instantaneous reading
   if (typeof driver.getMetrics !== 'function') return;
   try {
-    console.log('[scheduler] No energy snapshots available, falling back to instantaneous reading');
+    log.warn('consumption', 'No energy snapshots — falling back to instantaneous reading');
     const metrics = await driver.getMetrics(cfg);
     upsertConsumption(currentHourTs, metrics.consumption_w, outdoorTemp, 'inverter_instant');
     updateActual(currentHourTs, metrics.solar_w / 1000);
-    console.log(`[scheduler] Instantaneous fallback at ${currentHourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W`);
+    log.info('consumption', `Instantaneous fallback at ${currentHourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W`);
   } catch (err) {
-    console.error('[scheduler] Consumption fallback error:', err.message);
+    log.error('consumption', 'Consumption fallback error', err);
   }
 }
 
@@ -200,11 +201,11 @@ async function executePipeline() {
 
   const cfg = getDriverConfig();
   try {
-    console.log('[scheduler] Starting inverter execution pipeline...');
+    log.info('execute', 'Starting inverter execution pipeline');
 
     // Read actual SOC
     const state = await driver.getState(cfg);
-    console.log(`[scheduler] Inverter SOC: ${state.soc}%, power: ${state.power_w}W, mode: ${state.mode}`);
+    log.info('execute', `Inverter SOC: ${state.soc}%, power: ${state.power_w}W, mode: ${state.mode}`);
 
     // Get schedule for now → +24h
     const now = new Date();
@@ -217,7 +218,7 @@ async function executePipeline() {
 
     const slots = getScheduleForRange(fromTs, toTs);
     if (!slots.length) {
-      console.log('[scheduler] No schedule slots found — skipping execution');
+      log.warn('execute', 'No schedule slots found — skipping execution');
       return;
     }
 
@@ -225,19 +226,19 @@ async function executePipeline() {
     const nowTs = localTs(now);
     const futureSlots = slots.filter(s => s.slot_ts >= nowTs);
     if (!futureSlots.length) {
-      console.log('[scheduler] No future slots — skipping execution');
+      log.warn('execute', 'No future slots — skipping execution');
       return;
     }
 
     const result = await driver.applySchedule(futureSlots, cfg);
-    console.log(`[scheduler] Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
+    log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
   } catch (err) {
-    console.error('[scheduler] Inverter execution error:', err.message);
+    log.error('execute', 'Inverter execution error', err);
     try {
       await driver.resetToDefault(cfg);
-      console.log('[scheduler] Inverter reset to default after error');
+      log.info('execute', 'Inverter reset to default after error');
     } catch (resetErr) {
-      console.error('[scheduler] Inverter reset also failed:', resetErr.message);
+      log.error('execute', 'Inverter reset also failed', resetErr);
     }
   }
 }
@@ -286,8 +287,8 @@ cron.schedule('*/15 * * * *', () => {
 // --- Start server ---
 
 app.listen(PORT, () => {
-  console.log(`[scheduler] Solar Forecast API running on port ${PORT}`);
-  console.log(`[scheduler] Cron jobs registered: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
+  log.info('scheduler', `Solar Forecast API running on port ${PORT}`);
+  log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
 
 // Run initial pipelines on startup

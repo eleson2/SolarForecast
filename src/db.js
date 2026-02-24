@@ -158,6 +158,13 @@ const stmts = {
     ORDER BY hour_ts
   `),
 
+  getSolarReadingsForRange: db.prepare(`
+    SELECT hour_ts, irr_forecast, prod_forecast, prod_actual, confidence
+    FROM solar_readings
+    WHERE hour_ts >= ? AND hour_ts < ?
+    ORDER BY hour_ts
+  `),
+
   getReadingsWithoutForecast: db.prepare(`
     SELECT hour_ts, irr_forecast
     FROM solar_readings
@@ -225,6 +232,10 @@ export function getUnprocessedActuals() {
 
 export function getReadingsForForecast(fromTs, toTs) {
   return stmts.getReadingsForForecast.all(fromTs, toTs);
+}
+
+export function getSolarReadingsForRange(fromTs, toTs) {
+  return stmts.getSolarReadingsForRange.all(fromTs, toTs);
 }
 
 export function getReadingsWithoutForecast() {

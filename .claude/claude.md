@@ -13,14 +13,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install dependencies
 npm install
 
-# Start production server (Express + cron scheduler)
-node scheduler.js
+# --- Production (PM2) ---
+pm2 start ecosystem.config.cjs    # start as managed service
+pm2 stop solar-forecast           # stop
+pm2 restart solar-forecast        # restart
+pm2 logs solar-forecast           # stream logs (Ctrl+C to exit)
+pm2 logs solar-forecast --lines 200  # last 200 lines
+pm2 save && pm2 startup           # auto-start on Windows reboot
 
-# One-shot development run: fetch → parse → model → writes data/forecast.json
-node run-once.js
+# Log files (also written directly by the app)
+#   logs/app.log       — app log (rotated at 10 MB)
+#   logs/pm2-out.log   — PM2 stdout capture
+#   logs/pm2-error.log — PM2 stderr capture
 
-# One-shot battery optimizer run: prices → consumption → optimize → optional push
-node run-battery-once.js
+# --- Development ---
+node scheduler.js                 # run directly (no auto-restart)
+node run-once.js                  # one-shot: fetch → parse → model → data/forecast.json
+node run-battery-once.js          # one-shot: prices → consumption → optimize
 ```
 
 There are no test scripts. Manual one-shot scripts serve as integration tests.
