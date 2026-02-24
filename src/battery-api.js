@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import config from '../config.js';
-import { getScheduleForRange } from './db.js';
+import { getScheduleForRange, getSnapshotsForRange } from './db.js';
 
 const router = Router();
 
@@ -80,6 +80,41 @@ router.get('/schedule', (req, res) => {
       estimated_cost_with_battery: Math.round(costWith * 100) / 100,
       estimated_savings: Math.round((costWithout - costWith) * 100) / 100,
     },
+  });
+});
+
+// Last 24h: planned schedule + actual energy snapshots for comparison
+router.get('/history', (req, res) => {
+  const now = new Date();
+  const fromSlot = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  fromSlot.setSeconds(0, 0);
+
+  const fromTs = localTs(fromSlot);
+  const toTs   = localTs(now);
+
+  const schedule  = getScheduleForRange(fromTs, toTs);
+  const snapshots = getSnapshotsForRange(fromTs, toTs);
+
+  res.json({
+    generated_at: now.toISOString(),
+    timezone: config.location.timezone,
+    schedule: schedule.map(r => ({
+      slot:               r.slot_ts,
+      action:             r.action,
+      watts:              r.watts,
+      price_kwh:          r.price_kwh,
+      solar_watts:        r.solar_watts,
+      consumption_watts:  r.consumption_watts,
+      soc_start:          r.soc_start,
+      soc_end:            r.soc_end,
+    })),
+    snapshots: snapshots.map(s => ({
+      ts:                      s.snapshot_ts,
+      pv_today_kwh:            s.pv_today_kwh,
+      load_today_kwh:          s.load_today_kwh,
+      grid_import_today_kwh:   s.grid_import_today_kwh,
+      grid_export_today_kwh:   s.grid_export_today_kwh,
+    })),
   });
 });
 

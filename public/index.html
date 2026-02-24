@@ -103,6 +103,13 @@
     .kpi .lbl { font-size: 0.75rem; color: #777; }
     .kpi .val.green { color: #6ae08a; }
     .kpi .val.red   { color: #ff8080; }
+
+    .note {
+      font-size: 0.8rem;
+      color: #778;
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
@@ -159,6 +166,13 @@
         <tbody id="scheduleBody"></tbody>
       </table>
     </div>
+  </div>
+
+  <!-- 6. Last 24h battery history: planned SOC + price + action -->
+  <div class="card wide">
+    <h2>Battery — Last 24 h (Planned SOC & Price vs Action)</h2>
+    <div class="note" id="savingsNote"></div>
+    <div class="chart-wrap" style="height:260px"><canvas id="historyChart"></canvas></div>
   </div>
 
 </div>
@@ -386,12 +400,110 @@ async function loadSchedule() {
   if (nowRow) nowRow.scrollIntoView({ block: 'center' });
 }
 
+// --- Last 24h battery history ---
+const ACTION_BG = {
+  charge_grid:  'rgba(60,120,220,0.55)',
+  charge_solar: 'rgba(60,180,100,0.55)',
+  discharge:    'rgba(220,80,60,0.55)',
+  sell:         'rgba(120,200,80,0.55)',
+  idle:         'rgba(80,80,80,0.25)',
+};
+
+async function loadHistory() {
+  const data = await fetch('/battery/history').then(r => r.json());
+  const { schedule, snapshots } = data;
+
+  if (!schedule.length) return;
+
+  const labels   = schedule.map(r => fmtTime(r.slot));
+  const socData  = schedule.map(r => r.soc_start ?? null);
+  const priceData = schedule.map(r => r.price_kwh ?? null);
+  const barBg    = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
+
+  // Action counts for note
+  const counts = {};
+  for (const r of schedule) counts[r.action] = (counts[r.action] || 0) + 1;
+  const countStr = Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(', ');
+  document.getElementById('savingsNote').textContent =
+    `Actions over last 24 h — ${countStr}. ` +
+    `SOC shown at start of each 15-min slot. Price line on right axis.`;
+
+  destroyChart('history');
+  const ctx = document.getElementById('historyChart').getContext('2d');
+  charts.history = new Chart(ctx, {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'Action',
+          data: schedule.map(() => 100),   // full-height bars — colour only
+          backgroundColor: barBg,
+          borderWidth: 0,
+          yAxisID: 'ySoc',
+          order: 3,
+        },
+        {
+          type: 'line',
+          label: 'SOC %',
+          data: socData,
+          borderColor: '#6ab0ff',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 2,
+          yAxisID: 'ySoc',
+          order: 1,
+        },
+        {
+          type: 'line',
+          label: 'Price SEK/kWh',
+          data: priceData,
+          borderColor: '#f5c842',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          yAxisID: 'yPrice',
+          order: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: '#aaa', boxWidth: 12,
+          filter: item => item.datasetIndex !== 0 } },  // hide 'Action' from legend
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 0) {
+                return `Action: ${schedule[ctx.dataIndex]?.action}`;
+              }
+              return `${ctx.dataset.label}: ${ctx.raw?.toFixed(ctx.datasetIndex === 2 ? 3 : 1)}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { grid: { color: '#1e2130' }, ticks: { maxTicksLimit: 12, maxRotation: 0 } },
+        ySoc:   { position: 'left',  min: 0, max: 100, grid: { color: '#1e2130' },
+                  title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
+        yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                  title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
+      },
+    },
+  });
+}
+
 // --- Load all ---
 async function loadAll() {
   const ts = new Date().toLocaleString('sv-SE');
   document.getElementById('status').textContent = 'Refreshing…';
   try {
-    await Promise.all([loadPrices(), loadSolar(), loadSchedule()]);
+    await Promise.all([loadPrices(), loadSolar(), loadSchedule(), loadHistory()]);
     document.getElementById('status').textContent = `Updated ${ts}`;
   } catch (e) {
     document.getElementById('status').textContent = `Error: ${e.message}`;
