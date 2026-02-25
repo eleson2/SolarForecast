@@ -75,3 +75,49 @@ auth (username + password in config) to avoid exposing data publicly.
 A month × hour heatmap of the correction matrix would make it easy to see which
 hours are well-learned vs still at the default 1.0, and spot suspicious outliers
 (e.g. cloudy-day noise at low-irradiance hours).
+
+---
+
+## Learner / Correction Matrix (continued)
+
+### Make all correction factors adaptive (time-decay)
+
+**Context:** The matrix is indexed by `month × day × hour`, so within-year
+seasonal effects are already handled by structure — Feb 24 h12 only learns from
+Feb 24 h12 readings. What "adaptive" needs to solve is **cross-year drift**:
+panel degradation (~0.5%/yr), a tree that grew and now shades a specific hour,
+a new neighbouring building. An infinite running average resists these changes.
+
+**Proposed approach: exponential time decay on the weighted average**
+
+`last_updated` is already stored in the schema. When a new sample arrives,
+decay the existing accumulated weight before blending in the new sample:
+
+```
+days_since       = now − last_updated
+decay            = exp(−days_since / τ)        # τ = configurable half-life
+new_total_weight = decay × old_total_weight + new_irr_weight
+new_avg          = (decay × old_avg × old_total_weight
+                    + new_correction × new_irr_weight) / new_total_weight
+```
+
+With τ = 365 days:
+- 1-year-old data retains 37% of its original weight
+- 2-year-old data retains 14%
+- Cells not seen recently degrade gracefully — they keep their last value but
+  new data quickly dominates when the season returns
+
+**Sudden-change detection (secondary mechanism)**
+
+Decay alone is too slow for step changes (panel replaced, obstruction removed).
+Add a regime-change heuristic: if a new high-confidence sample (irr weight > 0.7)
+deviates from the running average by more than a factor of 2 in either direction,
+treat it as a possible regime change — multiply `total_weight` by e.g. 0.1
+before applying the update, letting the new data take over quickly.
+
+**Implementation notes**
+- No schema change needed (`last_updated` and `total_weight` already exist)
+- Add τ (half-life days) and regime-change threshold to `config.js`
+- Suggested defaults: τ = 365 days, regime threshold = 2.0×
+- **Prerequisite:** needs at least 6–12 months of data before time decay is
+  meaningful; implement when year-over-year comparisons become possible
