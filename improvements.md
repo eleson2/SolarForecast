@@ -6,24 +6,21 @@ Ideas collected here for later evaluation and prioritization.
 
 ## Learner / Correction Matrix
 
-### Weight corrections by irradiance level
-A correction factor learned on a cloudy day at 20 W/m² is much less reliable
-than one learned on a clear day at 400 W/m². Currently all samples are weighted
-equally, meaning a single cloudy day can distort a cell until enough clear-day
-samples average it out.
+### ~~Weight corrections by irradiance level~~ ✅ Done
+Implemented in `src/learner.js`. Each correction sample is now weighted by
+`irr / (irr + 50)` (half-saturation at 50 W/m²). The `correction_matrix` table
+gained a `total_weight` column. Weighted running average replaces the old
+equal-weight formula.
 
-**Idea:** Weight each new correction sample by the irradiance level (or a
-normalized confidence score) when updating `correction_avg`. High-irradiance
-samples count more; low-irradiance samples count less.
+### Use cloud cover forecast to further discount overcast corrections
+The irradiance weighting above already handles most of the problem. A further
+refinement: fetch actual cloud cover % from Open-Meteo alongside irradiance and
+multiply it into the weight: `weight = irr/(irr+50) × (1 - cloud_cover/100)`.
+This would penalise patchy-cloud hours where irradiance is moderate but
+production is unpredictable.
 
-### Use weather forecast to flag cloudy-day corrections
-Combine irradiance weighting with the Open-Meteo cloud cover forecast. When a
-learning update happens under heavily overcast conditions (e.g. cloud cover > 80%
-or irradiance < some threshold), mark the correction as low-confidence or skip
-it entirely. This would make the learner robust to bad-weather noise almost
-immediately rather than relying on the smoother to dilute it over weeks.
-
-**Depends on:** irradiance weighting above (both ideas work well together).
+**Note:** irradiance weighting alone may be sufficient — evaluate after a few
+weeks of weighted data before adding cloud cover.
 
 ---
 

@@ -94,6 +94,15 @@ if (!hasDayOfMonth) {
   `);
 }
 
+// --- Migrate correction_matrix: add total_weight column if missing ---
+
+const hasWeight = db.prepare("PRAGMA table_info(correction_matrix)").all().some(c => c.name === 'total_weight');
+if (!hasWeight) {
+  db.exec(`ALTER TABLE correction_matrix ADD COLUMN total_weight REAL DEFAULT 0`);
+  // Existing rows used equal weight (1.0 per sample) — total_weight = sample_count
+  db.exec(`UPDATE correction_matrix SET total_weight = sample_count WHERE sample_count > 0`);
+}
+
 // --- Seed correction_matrix with 8,784 rows (366 days × 24 hours) ---
 
 const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -143,7 +152,7 @@ const stmts = {
   `),
 
   getUnprocessedActuals: db.prepare(`
-    SELECT id, hour_ts, prod_forecast, prod_actual
+    SELECT id, hour_ts, irr_forecast, prod_forecast, prod_actual
     FROM solar_readings
     WHERE prod_actual IS NOT NULL
       AND correction IS NULL
@@ -173,14 +182,14 @@ const stmts = {
   `),
 
   getCorrectionCell: db.prepare(`
-    SELECT correction_avg, sample_count, max_prod
+    SELECT correction_avg, sample_count, total_weight, max_prod
     FROM correction_matrix
     WHERE month = ? AND day_of_month = ? AND hour_of_day = ?
   `),
 
   updateCorrectionMatrix: db.prepare(`
     UPDATE correction_matrix
-    SET correction_avg = ?, sample_count = ?, max_prod = ?, last_updated = datetime('now')
+    SET correction_avg = ?, sample_count = ?, total_weight = ?, max_prod = ?, last_updated = datetime('now')
     WHERE month = ? AND day_of_month = ? AND hour_of_day = ?
   `),
 
@@ -246,8 +255,8 @@ export function getCorrectionCell(month, dayOfMonth, hourOfDay) {
   return stmts.getCorrectionCell.get(month, dayOfMonth, hourOfDay);
 }
 
-export function updateCorrectionMatrix(month, dayOfMonth, hourOfDay, correctionAvg, sampleCount, maxProd) {
-  return stmts.updateCorrectionMatrix.run(correctionAvg, sampleCount, maxProd, month, dayOfMonth, hourOfDay);
+export function updateCorrectionMatrix(month, dayOfMonth, hourOfDay, correctionAvg, sampleCount, totalWeight, maxProd) {
+  return stmts.updateCorrectionMatrix.run(correctionAvg, sampleCount, totalWeight, maxProd, month, dayOfMonth, hourOfDay);
 }
 
 export function getAllCorrections() {
