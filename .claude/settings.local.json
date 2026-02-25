@@ -29,7 +29,9 @@
       "Bash(head:*)",
       "Bash(powershell.exe:*)",
       "Bash(pm2:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(cd:*)",
+      "Bash(npm install -g pm2-windows-startup 2>&1 | tail -5 && pm2-startup install 2>&1)"
     ]
   }
 }
