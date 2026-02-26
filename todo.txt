@@ -117,7 +117,7 @@ THIS MONTH
     - No CI needed — npm test locally is sufficient
     - Files: test/*.test.js, package.json
 
-[ ] README and runbook
+[x] README and runbook
     - Create README.md:
         What it does, prerequisites, setup (npm install → config.js → run-once)
         Going live procedure (dry_run → data_collection_only → live)
