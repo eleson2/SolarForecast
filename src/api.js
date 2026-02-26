@@ -1,8 +1,9 @@
 import express from 'express';
+import basicAuth from 'express-basic-auth';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
-import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange } from './db.js';
+import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange, getAllPipelineRuns, getSolarMAE } from './db.js';
 import batteryRouter from './battery-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -77,9 +78,70 @@ app.get('/api/solar', (req, res) => {
   });
 });
 
+// Expected maximum interval (minutes) between successful runs per pipeline
+const PIPELINE_INTERVALS = {
+  fetch:       6 * 60,
+  learn:       60,
+  smooth:      24 * 60,
+  battery:     60,
+  consumption: 60,
+  snapshot:    15,
+  execute:     15,
+};
+
+app.get('/health', (req, res) => {
+  const runs = getAllPipelineRuns();
+  const now = Date.now();
+  const pipelines = {};
+  let allOk = true;
+
+  for (const [name, maxMinutes] of Object.entries(PIPELINE_INTERVALS)) {
+    const row = runs.find(r => r.pipeline === name);
+    if (!row) {
+      pipelines[name] = { status: 'never_run', overdue: true };
+      allOk = false;
+      continue;
+    }
+    const ageMs = now - new Date(row.last_run_ts + 'Z').getTime();
+    const ageMin = Math.round(ageMs / 60000);
+    const overdue = ageMin > maxMinutes * 1.5; // 50% grace period
+    const ok = row.last_status === 'ok' && !overdue;
+    if (!ok) allOk = false;
+    pipelines[name] = { last_run: row.last_run_ts, status: row.last_status, age_min: ageMin, overdue };
+  }
+
+  res.status(allOk ? 200 : 503).json({ ok: allOk, pipelines });
+});
+
+// Forecast accuracy metrics
+app.get('/api/metrics', (req, res) => {
+  const now = new Date();
+  const days7  = new Date(now - 7  * 86400000).toISOString().slice(0, 16);
+  const days30 = new Date(now - 30 * 86400000).toISOString().slice(0, 16);
+
+  const mae7  = getSolarMAE(days7);
+  const mae30 = getSolarMAE(days30);
+
+  res.json({
+    solar_mae_kwh: {
+      last_7_days:  mae7.n  > 0 ? Math.round(mae7.mae  * 1000) / 1000 : null,
+      last_30_days: mae30.n > 0 ? Math.round(mae30.mae * 1000) / 1000 : null,
+      note: 'Mean absolute error between prod_forecast and prod_actual (kWh), irr > 50 W/m² only',
+    },
+    sample_counts: { last_7_days: mae7.n, last_30_days: mae30.n },
+  });
+});
+
 app.use('/battery', batteryRouter);
 
-// Serve dashboard
+// Serve dashboard (with optional basic auth)
+if (config.dashboard?.auth_pass) {
+  app.use(basicAuth({
+    users: { [config.dashboard.auth_user || 'admin']: config.dashboard.auth_pass },
+    challenge: true,
+    realm: 'SolarForecast',
+  }));
+}
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 export default app;

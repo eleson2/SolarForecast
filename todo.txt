@@ -1,0 +1,155 @@
+SolarForecast — Implementation To-Do
+======================================
+Sources: evaluation of improvements.md and Improvements.txt
+Format:  [ ] pending  [x] done  [~] deferred/skip
+
+----------------------------------------------------------------------
+BEFORE GO-LIVE (2 days)
+----------------------------------------------------------------------
+
+[x] Config validation at startup
+    - Create src/config-validator.js — validateConfig(cfg) throws with
+      clear message on: missing required fields, non-finite numbers,
+      discharge_soc >= charge_soc, SOC values outside [1,100],
+      invalid IANA timezone, unregistered price provider
+    - Call validateConfig(config) at top of scheduler.js before any
+      pipeline or cron setup; process.exit(1) on failure
+    - File: src/config-validator.js + scheduler.js
+
+[x] Health-check endpoint
+    - Add pipeline_runs table to db.js: (pipeline TEXT PK, last_run_ts,
+      last_status TEXT)
+    - Add recordPipelineRun(name, status) helper in db.js
+    - Call it at end of each pipeline in scheduler.js
+    - Add GET /health to src/api.js — returns each pipeline last_run_ts,
+      whether it is overdue (vs expected interval), overall ok: true/false
+    - Files: src/db.js, scheduler.js, src/api.js
+
+[x] Remote dashboard with basic auth
+    - npm install express-basic-auth
+    - Add dashboard: { auth_user, auth_pass } to config.js (empty = disabled)
+    - Mount express-basic-auth middleware in src/api.js before static files,
+      only when auth_pass is non-empty
+    - Document: HTTP only, not safe without TLS reverse proxy
+    - Files: config.js, src/api.js
+
+----------------------------------------------------------------------
+THIS WEEK
+----------------------------------------------------------------------
+
+[x] Retry logic in HTTP fetchers
+    - Add withRetry(fn, { attempts=3, delayMs=5000 }) to src/fetcher.js
+    - Wrap fetchWeather() and each fetchPricesForDate() call with withRetry
+    - Do NOT add to Modbus driver (rate-limit risk)
+    - Files: src/fetcher.js, src/prices/elprisetjust.js, src/prices/awattar.js
+
+[x] Log fetch URL and response time
+    - In src/fetcher.js and each price provider, log URL before fetch
+      and status + duration after
+    - Single log.info line each direction — no structural changes
+    - Files: src/fetcher.js, src/prices/elprisetjust.js, src/prices/awattar.js
+
+[x] Forecast MAE metric endpoint
+    - Add GET /api/metrics to src/api.js:
+        solar MAE: AVG(ABS(prod_actual - prod_forecast)) filtered to
+        irr_forecast > 50 W/m², for last 7 and 30 days
+        recency bias: current b value (log it; expose via endpoint)
+    - Log daily MAE at end of learnPipeline in scheduler.js
+    - Files: src/db.js (new query), src/api.js, scheduler.js
+
+[x] Consumption delta accuracy warning
+    - In consumptionPipeline (scheduler.js), after fetching snapNow,
+      compute gap between snapNow.snapshot_ts and expected hour boundary
+    - If gap > 10 min: log warning with actual span in minutes
+    - If gap < 90 min: prorate delta by (60 / actual_span_minutes)
+    - File: scheduler.js
+
+[ ] Store and overlay actual SOC on history chart
+    - Migrate energy_snapshots: ADD COLUMN soc INTEGER (db.js)
+    - In snapshotPipeline, call driver.getState(cfg) and pass soc to
+      upsertEnergySnapshot
+    - Update upsertEnergySnapshot signature + SQL to accept soc
+    - Add soc to GET /battery/history response
+    - Update frontend chart to draw actual SOC line alongside planned SOC
+    - Files: src/db.js, scheduler.js, src/battery-api.js, public/ (chart)
+
+----------------------------------------------------------------------
+THIS MONTH
+----------------------------------------------------------------------
+
+[ ] Price fallback when tomorrow's prices not yet available
+    - In src/price-fetcher.js, when fetchPricesForDate returns null,
+      load yesterday's prices from DB as fallback
+    - Log clearly when using fallback prices
+    - File: src/price-fetcher.js
+
+[ ] Backtest script
+    - Create scripts/backtest.js (standalone, one-shot):
+        --from YYYY-MM-DD --to YYYY-MM-DD args
+        For each day: load historical prices + solar + consumption from DB,
+        call runOptimizer(), compare planned cost vs actual (snapshots × prices)
+        Output: per-day planned savings, solar MAE, summary totals
+    - Read-only against existing DB data
+    - File: scripts/backtest.js
+
+[ ] Savings metric warning when SOC is low
+    - In GET /battery/schedule (battery-api.js), if first slot soc_start < 30%,
+      add warning field: "Starting SOC is low — savings estimate includes
+      charging cost and may be negative"
+    - File: src/battery-api.js
+
+[ ] Backfill consumption from snapshots after a gap
+    - Create scripts/backfill-consumption.js:
+        Scan energy_snapshots for consecutive pairs within 90 min
+        where consumption_readings has no entry for that hour
+        Compute delta and upsertConsumption for missing rows
+        Support --dry-run flag to preview without writing
+    - File: scripts/backfill-consumption.js
+
+[ ] Unit tests for core modules
+    - Create test/timeutils.test.js: parseTs() with known strings,
+      DST edge cases, midnight, noon
+    - Create test/learner.test.js: weighted average arithmetic,
+      high-irr sample dominates low-irr, incremental update correctness
+    - Create test/optimizer.test.js: charge at cheapest hours, discharge
+      at most expensive, SOC never exceeds capacity or floor
+    - Add "test": "node --test test/*.test.js" to package.json
+    - No CI needed — npm test locally is sufficient
+    - Files: test/*.test.js, package.json
+
+[ ] README and runbook
+    - Create README.md:
+        What it does, prerequisites, setup (npm install → config.js → run-once)
+        Going live procedure (dry_run → data_collection_only → live)
+        Manual override (POST /battery/control/*)
+        Troubleshooting (inverter rate-limit, PM2 log paths, bias clamp warning)
+    - File: README.md
+
+----------------------------------------------------------------------
+DEFERRED — needs more data
+----------------------------------------------------------------------
+
+[~] Cloud cover weighting in learner
+    Revisit after 6+ weeks. Irradiance weighting may be sufficient.
+    If still noisy at 50-150 W/m², add: weight *= (1 - cloud_cover/100)
+    Requires fetching cloud_cover from Open-Meteo and storing it.
+
+[~] Correction matrix heatmap (dashboard)
+    Revisit after 1 month of data. Currently too sparse to be meaningful.
+    month × hour heatmap, colour scale centred on 1.0.
+
+[~] Time-decay on correction matrix
+    Revisit after 12 months. Formula designed and ready in improvements.md.
+    Implement in learner.js when year-over-year data exists.
+
+[~] Risk-aware / probabilistic scheduling
+    Revisit after 3-6 months when confidence scores can be validated
+    against actual error distributions.
+
+----------------------------------------------------------------------
+SKIP
+----------------------------------------------------------------------
+
+[~] Dockerfile / docker-compose
+    Not applicable. Project needs local Modbus TCP access to 192.168.1.180.
+    Docker --network=host defeats isolation. PM2 is the right tool here.

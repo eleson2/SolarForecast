@@ -68,6 +68,12 @@ export default {
         // token: '',
         // device_sn: '',
     },
+    dashboard: {
+        // HTTP basic auth for remote access. Leave auth_pass empty to disable.
+        // WARNING: HTTP only — do not expose to the internet without a TLS reverse proxy.
+        auth_user: 'admin',
+        auth_pass: '',      // set a password to enable
+    },
     price: {
         source: 'elprisetjust',     // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)
         region: 'SE3',              // Provider-specific region code

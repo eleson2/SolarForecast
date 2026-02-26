@@ -1,4 +1,6 @@
 import config from '../../config.js';
+import log from '../logger.js';
+import { withRetry } from '../fetcher.js';
 
 /**
  * Map region code to aWATTar TLD.
@@ -25,19 +27,18 @@ export async function fetchPricesForDate(dateStr, region) {
 
   const url = `https://api.awattar.${tld}/v1/marketdata?start=${startMs}&end=${endMs}`;
 
-  const res = await fetch(url);
-  if (res.status === 404) {
-    return null;
-  }
-  if (!res.ok) {
-    throw new Error(`aWATTar API request failed: ${res.status} ${res.statusText}`);
-  }
+  return withRetry(async () => {
+    log.info('price', `GET ${url}`);
+    const t0 = Date.now();
+    const res = await fetch(url);
+    log.info('price', `${res.status} in ${Date.now() - t0}ms`);
 
-  const body = await res.json();
-  const data = body.data;
-  if (!data || data.length === 0) {
-    return null;
-  }
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`aWATTar API request failed: ${res.status} ${res.statusText}`);
+
+    const body = await res.json();
+    const data = body.data;
+    if (!data || data.length === 0) return null;
 
   // Each entry: { start_timestamp, end_timestamp, marketprice (EUR/MWh), unit }
   // Convert EUR/MWh → EUR/kWh (÷1000), expand each hour into 4×15-min slots
@@ -64,5 +65,6 @@ export async function fetchPricesForDate(dateStr, region) {
     }
   }
 
-  return { prices, raw: data };
+    return { prices, raw: data };
+  }, { attempts: 3, delayMs: 5000 });
 }

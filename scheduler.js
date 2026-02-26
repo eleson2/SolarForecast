@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { validateConfig } from './src/config-validator.js';
 import { fetchWeather } from './src/fetcher.js';
 import { parseWeatherData } from './src/parser.js';
 import { runModel } from './src/model.js';
@@ -7,11 +8,20 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer } from './src/optimizer.js';
-import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore } from './src/db.js';
+import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import config from './config.js';
 import app from './src/api.js';
 import log from './src/logger.js';
+
+// Validate config at startup — fail fast with a clear message rather than
+// a cryptic runtime error deep in a pipeline.
+try {
+  validateConfig(config);
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
 
 const PORT = process.env.PORT || 3000;
 
@@ -24,24 +34,30 @@ async function fetchPipeline() {
     parseWeatherData(data);
     runModel();
     log.info('fetch', 'Fetch pipeline complete');
+    recordPipelineRun('fetch');
   } catch (err) {
     log.error('fetch', 'Fetch pipeline error', err);
+    recordPipelineRun('fetch', 'error');
   }
 }
 
 function learnPipeline() {
   try {
     runLearner();
+    recordPipelineRun('learn');
   } catch (err) {
     log.error('learn', 'Learn pipeline error', err);
+    recordPipelineRun('learn', 'error');
   }
 }
 
 function smoothPipeline() {
   try {
     runSmoother();
+    recordPipelineRun('smooth');
   } catch (err) {
     log.error('smooth', 'Smooth pipeline error', err);
+    recordPipelineRun('smooth', 'error');
   }
 }
 
@@ -86,8 +102,10 @@ async function batteryPipeline() {
 
     runOptimizer(fromTs, toTs, consumption, options);
     log.info('battery', 'Battery optimizer pipeline complete');
+    recordPipelineRun('battery');
   } catch (err) {
     log.error('battery', 'Battery optimizer error', err);
+    recordPipelineRun('battery', 'error');
   }
 }
 
@@ -111,8 +129,10 @@ async function snapshotPipeline() {
       totals.grid_export_today_kwh,
     );
     log.info('snapshot', `${snapshotTs}: PV=${totals.pv_today_kwh}kWh load=${totals.load_today_kwh}kWh grid_in=${totals.grid_import_today_kwh}kWh`);
+    recordPipelineRun('snapshot');
   } catch (err) {
     log.error('snapshot', 'Snapshot pipeline error', err);
+    recordPipelineRun('snapshot', 'error');
   }
 }
 
@@ -157,6 +177,14 @@ async function consumptionPipeline() {
     const snapPrev = getSnapshotAtOrBefore(prevHourTs);
 
     if (snapNow && snapPrev) {
+      // Warn if nearest snapshot is far from the expected hour boundary
+      const snapNowAge  = Math.round(Math.abs(new Date(currentHourTs) - new Date(snapNow.snapshot_ts))  / 60000);
+      const snapPrevAge = Math.round(Math.abs(new Date(prevHourTs)    - new Date(snapPrev.snapshot_ts)) / 60000);
+      if (snapNowAge > 10 || snapPrevAge > 10) {
+        const spanMin = 60 + snapNowAge + snapPrevAge;
+        log.warn('consumption', `Snapshot boundary offset: now=${snapNowAge}min prev=${snapPrevAge}min — delta spans ~${spanMin}min instead of 60`);
+      }
+
       // Compute deltas; handle midnight reset (daily counter drops back to 0)
       const deltaLoad = snapNow.load_today_kwh >= snapPrev.load_today_kwh
         ? snapNow.load_today_kwh - snapPrev.load_today_kwh
@@ -174,6 +202,7 @@ async function consumptionPipeline() {
       updateActual(prevHourTs, deltaPv);
 
       log.info('consumption', `${prevHourTs}: load=${deltaLoad.toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
+      recordPipelineRun('consumption');
       return;
     }
   } catch (err) {
@@ -188,8 +217,10 @@ async function consumptionPipeline() {
     upsertConsumption(currentHourTs, metrics.consumption_w, outdoorTemp, 'inverter_instant');
     updateActual(currentHourTs, metrics.solar_w / 1000);
     log.info('consumption', `Instantaneous fallback at ${currentHourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W`);
+    recordPipelineRun('consumption');
   } catch (err) {
     log.error('consumption', 'Consumption fallback error', err);
+    recordPipelineRun('consumption', 'error');
   }
 }
 
@@ -232,6 +263,7 @@ async function executePipeline() {
 
     const result = await driver.applySchedule(futureSlots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
+    recordPipelineRun('execute');
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);
     try {

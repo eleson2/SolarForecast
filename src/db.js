@@ -74,6 +74,16 @@ db.exec(`
   );
 `);
 
+// --- pipeline_runs table (health-check) ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS pipeline_runs (
+    pipeline    TEXT PRIMARY KEY,
+    last_run_ts TEXT,
+    last_status TEXT
+  )
+`);
+
 // --- Migrate correction_matrix from old month×hour schema to month×day×hour ---
 
 const columns = db.prepare("PRAGMA table_info(correction_matrix)").all();
@@ -455,6 +465,41 @@ export function getSnapshotsForRange(fromTs, toTs) {
 export function getLastActualForHour(hourOfDay) {
   const hStr = String(hourOfDay).padStart(2, '0');
   return energyStmts.getLastActualForHour.get(hStr);
+}
+
+// --- Pipeline health-check helpers ---
+
+const healthStmts = {
+  upsertPipelineRun: db.prepare(`
+    INSERT INTO pipeline_runs (pipeline, last_run_ts, last_status)
+    VALUES (?, datetime('now'), ?)
+    ON CONFLICT(pipeline) DO UPDATE SET
+      last_run_ts = excluded.last_run_ts,
+      last_status = excluded.last_status
+  `),
+  getAllPipelineRuns: db.prepare(`SELECT pipeline, last_run_ts, last_status FROM pipeline_runs`),
+  getSolarMAE: db.prepare(`
+    SELECT
+      AVG(ABS(prod_actual - prod_forecast)) AS mae,
+      COUNT(*) AS n
+    FROM solar_readings
+    WHERE prod_actual IS NOT NULL
+      AND prod_forecast IS NOT NULL
+      AND irr_forecast > 50
+      AND hour_ts >= ?
+  `),
+};
+
+export function recordPipelineRun(pipeline, status = 'ok') {
+  return healthStmts.upsertPipelineRun.run(pipeline, status);
+}
+
+export function getAllPipelineRuns() {
+  return healthStmts.getAllPipelineRuns.all();
+}
+
+export function getSolarMAE(fromTs) {
+  return healthStmts.getSolarMAE.get(fromTs);
 }
 
 export default db;
