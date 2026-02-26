@@ -94,6 +94,13 @@ if (!hasDayOfMonth) {
   `);
 }
 
+// --- Migrate solar_readings: add correction_applied column if missing ---
+
+const srColumns = db.prepare("PRAGMA table_info(solar_readings)").all();
+if (!srColumns.some(c => c.name === 'correction_applied')) {
+  db.exec(`ALTER TABLE solar_readings ADD COLUMN correction_applied REAL`);
+}
+
 // --- Migrate correction_matrix: add total_weight column if missing ---
 
 const hasWeight = db.prepare("PRAGMA table_info(correction_matrix)").all().some(c => c.name === 'total_weight');
@@ -135,7 +142,7 @@ const stmts = {
 
   updateForecast: db.prepare(`
     UPDATE solar_readings
-    SET prod_forecast = ?, confidence = ?
+    SET prod_forecast = ?, confidence = ?, correction_applied = ?
     WHERE hour_ts = ?
   `),
 
@@ -177,7 +184,8 @@ const stmts = {
   getReadingsWithoutForecast: db.prepare(`
     SELECT hour_ts, irr_forecast
     FROM solar_readings
-    WHERE irr_forecast IS NOT NULL AND prod_forecast IS NULL
+    WHERE irr_forecast IS NOT NULL
+      AND (prod_forecast IS NULL OR correction_applied IS NULL)
     ORDER BY hour_ts
   `),
 
@@ -217,14 +225,24 @@ const stmts = {
     FROM solar_readings
     WHERE correction IS NOT NULL AND confidence IS NOT NULL
   `),
+
+  getRecentActualsForBias: db.prepare(`
+    SELECT prod_actual, prod_forecast, irr_forecast
+    FROM solar_readings
+    WHERE prod_actual  IS NOT NULL
+      AND prod_forecast IS NOT NULL AND prod_forecast > 0
+      AND irr_forecast  IS NOT NULL AND irr_forecast  > 0
+      AND hour_ts >= ?
+    ORDER BY hour_ts
+  `),
 };
 
 export function upsertReading(hourTs, irrForecast) {
   return stmts.upsertReading.run(hourTs, irrForecast);
 }
 
-export function updateForecast(hourTs, prodForecast, confidence) {
-  return stmts.updateForecast.run(prodForecast, confidence, hourTs);
+export function updateForecast(hourTs, prodForecast, confidence, correctionApplied) {
+  return stmts.updateForecast.run(prodForecast, confidence, correctionApplied ?? null, hourTs);
 }
 
 export function updateActual(hourTs, prodActual) {
@@ -273,6 +291,10 @@ export function getSmoothCell(dayOfYear, hourOfDay) {
 
 export function getReadingsForSmoothing() {
   return stmts.getReadingsForSmoothing.all();
+}
+
+export function getRecentActualsForBias(fromTs) {
+  return stmts.getRecentActualsForBias.all(fromTs);
 }
 
 // --- Battery optimizer query helpers ---
