@@ -12,7 +12,13 @@ export default {
     },
     learning: {
         min_irradiance_weight: 400,    // W/m² — below this, observation gets low confidence
-        empirical_blend_threshold: 30  // number of observations before fully trusting matrix
+        empirical_blend_threshold: 30, // number of observations before fully trusting matrix
+        recency_bias: {
+            window_days: 14,   // rolling window of actuals used to compute the global bias scalar
+            min_samples: 10,   // minimum total irradiance-weight before activating (else b=1)
+            clamp_min: 0.5,    // floor: flag if model is off by more than 2× low
+            clamp_max: 2.0,    // ceiling: flag if model is off by more than 2× high
+        }
     },
     forecast: {
         horizon_hours: 24,
@@ -54,9 +60,8 @@ export default {
 
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.
-        charge_soc: 95,                           // SOC floor when charging (high = battery fills up)
-        discharge_soc: 13,                        // SOC floor when discharging (low = battery empties)
-        //                                        // 13% is the MOD TL3-XH minimum allowed value
+        charge_soc: 90,                           // SOC floor when charging (high = battery fills up)
+        discharge_soc: 20,                        // SOC floor when discharging (low = battery empties)
 
         // --- Growatt cloud API settings (used when brand = 'growatt') ---
         // server: 'https://openapi.growatt.com/',

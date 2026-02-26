@@ -12,7 +12,8 @@ import * as growattModbus from './inverters/growatt-modbus.js';
 const drivers = { growatt, 'growatt-modbus': growattModbus };
 
 /**
- * @returns {{ getState: Function, applySchedule: Function, resetToDefault: Function } | null}
+ * @returns {{ getState: Function, applySchedule: Function, resetToDefault: Function,
+ *             charge: Function, discharge: Function, idle: Function } | null}
  */
 export function getDriver() {
   const brand = config.inverter?.brand;

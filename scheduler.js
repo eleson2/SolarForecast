@@ -276,11 +276,13 @@ cron.schedule('5 * * * *', () => {
   consumptionPipeline();
 });
 
-// Every 15 min: snapshot energy totals + (unless data_collection_only) push schedule to inverter
-cron.schedule('*/15 * * * *', () => {
-  snapshotPipeline();
+// Every 15 min: snapshot → execute → replan
+// Pipelines run sequentially so batteryPipeline sees the post-command SOC.
+cron.schedule('*/15 * * * *', async () => {
+  await snapshotPipeline();
   if (!config.inverter.data_collection_only) {
-    executePipeline();
+    await executePipeline();
+    await batteryPipeline();
   }
 });
 
@@ -291,11 +293,14 @@ app.listen(PORT, () => {
   log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
 
-// Run initial pipelines on startup
+// Run initial pipelines on startup (same order as cron: snapshot → battery → execute → replan)
 fetchPipeline();
-batteryPipeline();
 snapshotPipeline();
 consumptionPipeline();
-if (!config.inverter.data_collection_only) {
-  executePipeline();
-}
+(async () => {
+  await batteryPipeline();
+  if (!config.inverter.data_collection_only) {
+    await executePipeline();
+    await batteryPipeline();
+  }
+})();

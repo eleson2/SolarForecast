@@ -288,6 +288,76 @@ export async function applySchedule(slots, cfg) {
   });
 }
 
+// --- Direct control primitives ---
+// All three read current SOC first (for logging / idle hold value), then write
+// holding register 3310 (LoadFirstStopSocSet) to steer the battery.
+
+/**
+ * Force battery to charge: set discharge floor to charge_soc (default 90%).
+ * The inverter must keep SOC ≥ floor, so it draws from grid/PV to fill the battery.
+ * @param {object} cfg — inverter config
+ * @returns {Promise<{ soc: number, target: number }>}
+ */
+export async function charge(cfg) {
+  const state = await getState(cfg);
+  const target = cfg.charge_soc ?? 90;
+  console.log(`[growatt-modbus] charge: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}%`);
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
+    return { soc: state.soc, target };
+  }
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, target);
+    return { soc: state.soc, target };
+  });
+}
+
+/**
+ * Allow battery to discharge: set discharge floor to discharge_soc (default 20%).
+ * The inverter serves loads from the battery down to the floor.
+ * @param {object} cfg — inverter config
+ * @returns {Promise<{ soc: number, target: number }>}
+ */
+export async function discharge(cfg) {
+  const state = await getState(cfg);
+  const target = cfg.discharge_soc ?? 20;
+  console.log(`[growatt-modbus] discharge: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}%`);
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
+    return { soc: state.soc, target };
+  }
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, target);
+    return { soc: state.soc, target };
+  });
+}
+
+/**
+ * Hold battery at current SOC: set discharge floor = current SOC.
+ * The battery can neither charge above nor discharge below its present level.
+ * @param {object} cfg — inverter config
+ * @returns {Promise<{ soc: number, target: number }>}
+ */
+export async function idle(cfg) {
+  const state = await getState(cfg);
+  const target = state.soc;
+  console.log(`[growatt-modbus] idle: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}% (hold)`);
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
+    return { soc: state.soc, target };
+  }
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, target);
+    return { soc: state.soc, target };
+  });
+}
+
 /**
  * Reset SOC floor back to a safe default (min_soc from config).
  * @param {object} cfg — inverter config

@@ -31,7 +31,7 @@ Battery charge/discharge optimization is handled by the Battery Optimizer module
 | `src/db.js`        | Done        | Schema init, seeding, all query helpers             |
 | `src/fetcher.js`   | Done        | Open-Meteo fetch, raw JSON archival                |
 | `src/parser.js`    | Done        | Decoupled from source format                       |
-| `src/model.js`     | Done        | Geometry fallback + empirical blending             |
+| `src/model.js`     | Done        | Geometry fallback + empirical blending + recency bias layer |
 | `src/learner.js`   | Done        | Incremental weighted average updates               |
 | `src/smoother.js`  | Done        | Gaussian kernel, year-wrap, production weighting   |
 | `src/api.js`       | Done        | `GET /forecast` endpoint                           |
@@ -110,7 +110,13 @@ export default {
     },
     learning: {
         min_irradiance_weight: 400,    // W/m² — below this, observation gets low confidence
-        empirical_blend_threshold: 30  // number of observations before fully trusting matrix
+        empirical_blend_threshold: 30, // number of observations before fully trusting matrix
+        recency_bias: {
+            window_days: 14,   // rolling window for global bias scalar
+            min_samples: 10,   // minimum irr-weight before activating (else b=1)
+            clamp_min: 0.5,    // floor — warn if bias below this
+            clamp_max: 2.0,    // ceiling — warn if bias above this
+        }
     },
     forecast: {
         horizon_hours: 24,
@@ -168,14 +174,24 @@ This decouples the weather source — switching from Open-Meteo to another provi
 (or to a file-based guesstimate) only requires changes in `parser.js`.
 
 ### 3. Model
-`model.js` produces `prod_forecast` for each hour using:
+`model.js` produces `prod_forecast` for each hour using a two-layer correction:
 
 ```
-prod_forecast = peak_kw × (irr_forecast / 1000) × correction_factor(month, hour)
+prod_forecast = peak_kw × (irr_forecast / 1000) × matrix_correction × recency_bias
 ```
 
-Where `correction_factor` comes from the learned matrix. Before enough data exists,
-it falls back to a geometry-based estimate derived from tilt and azimuth.
+**Layer 1 — matrix correction** (`matrix_correction`): the blended empirical/geometry
+correction from the learned matrix. Adapts over months as new seasonal data arrives.
+Stored in `solar_readings.correction_applied` at forecast time.
+
+**Layer 2 — recency bias** (`recency_bias`): a global scalar computed fresh each run
+from the irradiance-weighted mean of `actual / forecast` over the last 14 days. Captures
+short-term deviations (dirty panel, new obstruction) within days rather than months.
+Falls back to 1.0 when fewer than 10 irradiance-weight units of data are available.
+Clamped to [0.5, 2.0] — values outside that range log a warning (likely a metering error).
+
+Before enough matrix data exists, falls back to a geometry-based estimate derived from
+tilt and azimuth.
 
 ### 4. Learn
 `learner.js` runs hourly. When `prod_actual` is available for a past hour, it computes:
@@ -213,13 +229,14 @@ Stores the raw forecast, model output, actual production, and derived correction
 
 ```sql
 CREATE TABLE solar_readings (
-    id              INTEGER PRIMARY KEY,
-    hour_ts         DATETIME UNIQUE,  -- exact hour, in configured timezone
-    irr_forecast    REAL,             -- W/m², from weather source
-    prod_forecast   REAL,             -- kWh, model output
-    prod_actual     REAL,             -- kWh, from inverter/meter (null until known)
-    correction      REAL,             -- prod_actual / prod_forecast (null until known)
-    confidence      REAL              -- observation weight 0–1, based on irradiance level
+    id                  INTEGER PRIMARY KEY,
+    hour_ts             DATETIME UNIQUE,  -- exact hour, in configured timezone
+    irr_forecast        REAL,             -- W/m², from weather source
+    prod_forecast       REAL,             -- kWh, model output (includes recency bias)
+    prod_actual         REAL,             -- kWh, from inverter/meter (null until known)
+    correction          REAL,             -- prod_actual / prod_forecast (null until known)
+    confidence          REAL,             -- observation weight 0–1, based on irradiance level
+    correction_applied  REAL              -- matrix correction used at forecast time (layer 1 only, no bias)
 );
 ```
 
@@ -291,6 +308,13 @@ const empirical_weight = Math.min(1.0, sample_count / 30);
 const correction = (empirical_weight * matrix_correction)
                  + ((1 - empirical_weight) * geometry_correction);
 ```
+
+### Recency bias (Layer 2)
+A global scalar `b` computed fresh each time `model.js` runs. Answers: "over the last
+14 days, how much did actual production differ from the matrix-corrected forecast?"
+Uses the same irradiance half-saturation weighting as the learner (k=50 W/m²).
+Falls back to 1.0 when there is insufficient data in the window. Complements the matrix:
+matrix adapts over months; bias adapts within days.
 
 ### Smoothing
 Correction matrix values are smoothed across ±7 days of day-of-year using a Gaussian kernel

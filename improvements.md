@@ -121,3 +121,97 @@ before applying the update, letting the new data take over quickly.
 - Suggested defaults: τ = 365 days, regime threshold = 2.0×
 - **Prerequisite:** needs at least 6–12 months of data before time decay is
   meaningful; implement when year-over-year comparisons become possible
+
+---
+
+### Two-layer correction: matrix + recency bias
+
+**Context:** The correction matrix is a slow-moving seasonal structure — a
+given cell (e.g. Feb 24 h12) accumulates one new sample per year and adapts
+over months. This is correct for systematic model error (wrong panel tilt in
+config, fixed horizon shading). But it cannot react quickly to current-state
+changes: a dirty panel, bird droppings, a new obstruction. Those show up as
+a persistent global offset in the recent actual/forecast ratios — across *all*
+hours, not one cell.
+
+The time-decay approach above addresses cross-year drift but doesn't separate
+these two signals. A two-layer design keeps them independent and lets each
+adapt at its natural timescale.
+
+**Layer 1 — Structural matrix (slow, seasonal)**
+
+The existing `correction_matrix_smooth` table. Adapts over months. Captures
+systematic corrections that vary by time of year and hour of day. Eventually
+enhanced with the time-decay above (τ = 180–365 days).
+
+**Layer 2 — Recency bias (fast, global)**
+
+A single scalar `b` computed fresh on each `model.js` call. It answers:
+"Over the last N days, how much has actual production differed from the
+matrix-corrected forecast, on average?"
+
+```
+b = Σ (actual_i / (forecast_i × matrix_correction_i)) × irr_weight_i
+    ─────────────────────────────────────────────────────────────────
+                        Σ irr_weight_i
+```
+
+where the sum runs over all solar hours in the last `RECENCY_WINDOW_DAYS`
+days (suggested default: 14), and `irr_weight_i = irr / (irr + 50)` (same
+half-saturation curve as the learner).
+
+Final correction applied per hour in `model.js`:
+
+```
+corrected_prod = physics_forecast × matrix_correction × b
+```
+
+**Behaviour at different timescales:**
+
+| Timescale | What moves | Result |
+|---|---|---|
+| Last hours | b only | Same-day forecast adjusts within hours |
+| Last 1–2 weeks | b only | Fouling, obstruction detected in days |
+| Same period last year | matrix | Seasonal baseline unchanged |
+| Multi-year drift | matrix + time-decay | Slow degradation absorbed |
+
+**Guardrails**
+
+- Clamp `b` to `[0.5, 2.0]` — a global bias outside that range indicates a
+  data problem (e.g. metering error), not a real panel state change. Log a
+  warning if the clamp activates.
+- Minimum sample requirement: if the window contains fewer than 10
+  irradiance-weighted samples (e.g. two weeks of cloud), fall back to `b = 1`
+  and log. Do not apply a bias from insufficient data.
+- The bias is global, not per-hour. If only morning hours are affected (e.g.
+  shade from a new structure to the east), b will be diluted by unaffected
+  hours. This is intentional — per-cell short-term bias would overfit noise.
+  The matrix is the right place to encode hour-specific corrections once
+  enough samples accumulate.
+
+**Implementation notes**
+
+- New DB query in `src/db.js`: fetch `(prod_actual, prod_forecast,
+  correction_applied, irr_forecast, hour_ts)` from `solar_readings` for the
+  last N days where `prod_actual IS NOT NULL AND irr_forecast > 0`.
+  `correction_applied` must be the matrix correction that was used when the
+  forecast was made — requires storing it at forecast time (see below).
+- `model.js` should store the matrix correction it applies alongside the
+  forecast in `solar_readings` (new column `correction_applied REAL`). This
+  is needed so Layer 2 can compute the residual correctly. Without it, the
+  bias formula conflates matrix error with recency error.
+- Add `RECENCY_WINDOW_DAYS` (default 14) and `RECENCY_CLAMP` (default
+  `[0.5, 2.0]`) to `config.js`.
+- **Prerequisite:** `correction_applied` column requires a schema migration
+  and a few weeks of populated data before the bias is meaningful. Add the
+  column first; fall back to `b = 1` until enough rows exist.
+
+**Interaction with time-decay**
+
+The two mechanisms are complementary, not redundant:
+- Time-decay makes the *matrix* slowly forget old years.
+- Recency bias captures *current deviations from whatever the matrix says*.
+
+Even with perfect time-decay, you'd still want a recency bias for fast
+response to step changes. Even with a recency bias, you still want time-decay
+so the matrix doesn't permanently encode a bad season into the long-term average.
