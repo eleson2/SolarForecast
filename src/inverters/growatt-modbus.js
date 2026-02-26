@@ -263,9 +263,9 @@ export async function applySchedule(slots, cfg) {
   let targetSoc;
 
   if (intent === 'charge') {
-    targetSoc = cfg.charge_soc ?? 95;
+    targetSoc = cfg.charge_soc ?? 90;
   } else if (intent === 'discharge') {
-    targetSoc = cfg.discharge_soc ?? 13;
+    targetSoc = cfg.discharge_soc ?? 20;
   } else {
     // idle: read current SOC and hold there
     const state = await getState(cfg);

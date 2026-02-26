@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import config from '../config.js';
 import { getScheduleForRange, getSnapshotsForRange } from './db.js';
+import { getDriver, getDriverConfig } from './inverter-dispatcher.js';
 
 const router = Router();
 
@@ -117,5 +118,50 @@ router.get('/history', (req, res) => {
     })),
   });
 });
+
+// --- Inverter manual control ---
+// Endpoints call the charge/discharge/idle primitives directly, bypassing the
+// schedule. The override lasts until the next scheduled execute cycle (~15 min)
+// restores schedule-based control.
+//
+// All commands respect dry_run from config. data_collection_only does NOT apply
+// here — manual overrides are always attempted so the user can test independently
+// of the automated schedule.
+
+router.get('/control/status', async (req, res) => {
+  const driver = getDriver();
+  if (!driver) return res.status(503).json({ error: 'No inverter configured' });
+  try {
+    const state = await driver.getState(getDriverConfig());
+    res.json({ soc: state.soc, power_w: state.power_w, mode: state.mode });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+async function runControl(res, action) {
+  const driver = getDriver();
+  if (!driver) return res.status(503).json({ error: 'No inverter configured' });
+  if (typeof driver[action] !== 'function') {
+    return res.status(501).json({ error: `Driver does not support '${action}'` });
+  }
+  const cfg = getDriverConfig();
+  try {
+    const result = await driver[action](cfg);
+    res.json({
+      action,
+      soc: result.soc,
+      target_soc: result.target,
+      dry_run: cfg.dry_run ?? false,
+      note: 'Override active until next scheduled execute cycle (~15 min)',
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+}
+
+router.post('/control/charge',    (req, res) => runControl(res, 'charge'));
+router.post('/control/discharge', (req, res) => runControl(res, 'discharge'));
+router.post('/control/idle',      (req, res) => runControl(res, 'idle'));
 
 export default router;
