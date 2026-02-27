@@ -3,7 +3,7 @@ import basicAuth from 'express-basic-auth';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
-import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange, getAllPipelineRuns, getSolarMAE, getAllConsumptionModels } from './db.js';
+import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange, getAllPipelineRuns, getSolarMAE, getDaytimeConsumptionModel } from './db.js';
 import batteryRouter from './battery-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -133,19 +133,18 @@ app.get('/api/metrics', (req, res) => {
   });
 });
 
-// Consumption temperature model — per-hour OLS regression coefficients
+// Consumption temperature model — single daytime OLS regression
 app.get('/api/consumption-model', (req, res) => {
-  const rows = getAllConsumptionModels();
+  const m = getDaytimeConsumptionModel();
   res.json({
-    note: 'Linear model: consumption_w = slope * outdoor_temp + intercept. Daytime hours (08–18) typically show strongest correlation.',
-    hours: rows.map(r => ({
-      hour: r.hour_of_day,
-      slope_w_per_c:  r.slope    != null ? Math.round(r.slope)    : null,
-      intercept_w:    r.intercept != null ? Math.round(r.intercept) : null,
-      r_squared:      r.r_squared != null ? Math.round(r.r_squared * 100) / 100 : null,
-      sample_count:   r.sample_count,
-      last_updated:   r.last_updated,
-    })),
+    note: 'Single linear model fit across all daytime hours (08–18): consumption_w = slope * outdoor_temp + intercept. Nighttime excluded (EV charging).',
+    model: m ? {
+      slope_w_per_c: Math.round(m.slope),
+      intercept_w:   Math.round(m.intercept),
+      r_squared:     Math.round(m.r_squared * 100) / 100,
+      sample_count:  m.sample_count,
+      last_updated:  m.last_updated,
+    } : null,
   });
 });
 

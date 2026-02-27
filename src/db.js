@@ -84,17 +84,26 @@ db.exec(`
   )
 `);
 
-// --- consumption_model table (linear regression coefficients per hour-of-day) ---
-// Stores OLS fit of consumption_w = slope * outdoor_temp + intercept for each hour.
-// Rebuilt hourly by learnConsumptionModel() once enough samples exist.
+// --- consumption_model table (single daytime linear regression) ---
+// Stores one OLS fit across all daytime hours (08–18):
+//   consumption_w = slope * outdoor_temp + intercept
+// Heat loss is temperature-driven, not time-of-day-driven, so one line fits all daytime hours.
+// Nighttime is excluded (EV charging contaminates the signal).
+// Rebuilt hourly by learnConsumptionModel() once MIN_SAMPLES exist.
+
+// Migrate old per-hour schema (hour_of_day INTEGER PK) to single-row schema (model_key TEXT PK)
+const cmCols = db.prepare("PRAGMA table_info(consumption_model)").all();
+if (cmCols.length > 0 && cmCols.some(c => c.name === 'hour_of_day')) {
+  db.exec('DROP TABLE IF EXISTS consumption_model');
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS consumption_model (
-    hour_of_day   INTEGER PRIMARY KEY,
-    slope         REAL,       -- W/°C (negative for heating: colder → more consumption)
-    intercept     REAL,       -- W at 0°C
-    sample_count  INTEGER,
-    r_squared     REAL,       -- goodness of fit (0–1); < 0.3 means weak correlation
+    model_key     TEXT PRIMARY KEY,  -- 'daytime' (hours 08–18)
+    slope         REAL,              -- W/°C (negative for heating: colder → more consumption)
+    intercept     REAL,              -- W at 0°C
+    sample_count  INTEGER,           -- number of (temp, consumption) pairs used
+    r_squared     REAL,              -- goodness of fit (0–1); < 0.3 = weak correlation
     last_updated  DATETIME
   )
 `);
@@ -520,21 +529,22 @@ export function getSolarMAE(fromTs) {
 // --- Consumption model helpers ---
 
 const consumptionModelStmts = {
-  // All hourly rows for a given hour-of-day that have both temp and consumption
-  getHistoryForHour: db.prepare(`
+  // All daytime (08–18) readings that have both temp and consumption
+  getDaytimeHistory: db.prepare(`
     SELECT consumption_w, outdoor_temp
     FROM consumption_readings
-    WHERE strftime('%H', hour_ts) = ?
-      AND outdoor_temp   IS NOT NULL
-      AND consumption_w  IS NOT NULL
-      AND consumption_w  > 0
+    WHERE CAST(strftime('%H', hour_ts) AS INTEGER) >= 8
+      AND CAST(strftime('%H', hour_ts) AS INTEGER) <= 18
+      AND outdoor_temp  IS NOT NULL
+      AND consumption_w IS NOT NULL
+      AND consumption_w > 0
     ORDER BY hour_ts
   `),
 
   upsertModel: db.prepare(`
-    INSERT INTO consumption_model (hour_of_day, slope, intercept, sample_count, r_squared, last_updated)
-    VALUES (?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(hour_of_day) DO UPDATE SET
+    INSERT INTO consumption_model (model_key, slope, intercept, sample_count, r_squared, last_updated)
+    VALUES ('daytime', ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(model_key) DO UPDATE SET
       slope        = excluded.slope,
       intercept    = excluded.intercept,
       sample_count = excluded.sample_count,
@@ -542,34 +552,23 @@ const consumptionModelStmts = {
       last_updated = excluded.last_updated
   `),
 
-  getAllModels: db.prepare(`
-    SELECT hour_of_day, slope, intercept, sample_count, r_squared, last_updated
+  getModel: db.prepare(`
+    SELECT slope, intercept, sample_count, r_squared, last_updated
     FROM consumption_model
-    ORDER BY hour_of_day
-  `),
-
-  getModelForHour: db.prepare(`
-    SELECT slope, intercept, sample_count, r_squared
-    FROM consumption_model
-    WHERE hour_of_day = ?
+    WHERE model_key = 'daytime'
   `),
 };
 
-export function getConsumptionHistoryForHour(hourOfDay) {
-  const hStr = String(hourOfDay).padStart(2, '0');
-  return consumptionModelStmts.getHistoryForHour.all(hStr);
+export function getDaytimeConsumptionHistory() {
+  return consumptionModelStmts.getDaytimeHistory.all();
 }
 
-export function upsertConsumptionModel(hourOfDay, slope, intercept, sampleCount, rSquared) {
-  return consumptionModelStmts.upsertModel.run(hourOfDay, slope, intercept, sampleCount, rSquared);
+export function upsertConsumptionModel(slope, intercept, sampleCount, rSquared) {
+  return consumptionModelStmts.upsertModel.run(slope, intercept, sampleCount, rSquared);
 }
 
-export function getAllConsumptionModels() {
-  return consumptionModelStmts.getAllModels.all();
-}
-
-export function getConsumptionModelForHour(hourOfDay) {
-  return consumptionModelStmts.getModelForHour.get(hourOfDay);
+export function getDaytimeConsumptionModel() {
+  return consumptionModelStmts.getModel.get();
 }
 
 export default db;

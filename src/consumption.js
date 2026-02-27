@@ -1,5 +1,8 @@
 import config from '../config.js';
-import { getConsumptionForRange, getConsumptionModelForHour } from './db.js';
+import { getConsumptionForRange, getDaytimeConsumptionModel } from './db.js';
+
+const DAYTIME_START = 8;   // first hour covered by the temperature model (inclusive)
+const DAYTIME_END   = 18;  // last hour covered by the temperature model (inclusive)
 
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
@@ -89,6 +92,9 @@ export async function estimateConsumption() {
     }
 
     if (yesterdayData.length > 0) {
+      // Single daytime model: one slope+intercept fit across all hours 08–18.
+      // Nighttime falls through to yesterday's data (EV charging excluded from model).
+      const daytimeModel = getDaytimeConsumptionModel();
       let modelHours = 0;
       let yesterdayHours = 0;
 
@@ -97,11 +103,9 @@ export async function estimateConsumption() {
         const hourTs = `${todayDateStr}T${hStr}:00`;
         const forecastTemp = temps?.get(hourTs) ?? null;
 
-        // --- Path 1: learned regression model ---
-        // Use when a model with sufficient samples exists AND forecast temp is available.
-        const model = getConsumptionModelForHour(h);
-        if (model && forecastTemp !== null) {
-          const predicted = Math.round(model.slope * forecastTemp + model.intercept);
+        // --- Path 1: learned regression model (daytime only) ---
+        if (h >= DAYTIME_START && h <= DAYTIME_END && daytimeModel && forecastTemp !== null) {
+          const predicted = Math.round(daytimeModel.slope * forecastTemp + daytimeModel.intercept);
           // Clamp to a plausible range (never below 100 W, never above 3× flat_watts)
           const clamped = Math.max(100, Math.min(config.consumption.flat_watts * 3, predicted));
           estimates.push({ hour_ts: hourTs, consumption_w: clamped });
@@ -138,7 +142,7 @@ export async function estimateConsumption() {
       }
 
       const src = modelHours > 0
-        ? `model(${modelHours}h) + yesterday(${yesterdayHours}h)`
+        ? `model(${modelHours}h daytime) + yesterday(${yesterdayHours}h)`
         : `yesterday(${yesterdayHours}h)`;
       console.log(`[consumption] Estimated 24h via ${src}`);
       return estimates;

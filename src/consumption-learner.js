@@ -1,30 +1,31 @@
 /**
- * Learns a per-hour linear regression model from historical (outdoor_temp, consumption_w) pairs.
+ * Learns a single linear regression model from daytime (outdoor_temp, consumption_w) pairs.
  *
  * Model: consumption_w = slope × outdoor_temp + intercept
  *
- * For a heating climate (most Swedish homes) the slope is negative:
- * colder outdoor temps → higher electrical consumption (space heating, hot water).
+ * Rationale: heat loss from a building is governed by the temperature differential
+ * between inside and outside, not by the time of day. A house at 5°C outside needs
+ * the same watts to stay warm at 10:00 as at 15:00. One regression line across all
+ * daytime hours (08–18) is therefore correct and also pools far more data points
+ * than per-hour models would (11× more samples for the same number of days).
  *
- * Only hours DAYTIME_START–DAYTIME_END (08:00–18:00) are modelled.
- * Nighttime hours are intentionally excluded because that is when electric vehicles
- * are typically charged, which creates large consumption spikes unrelated to temperature.
+ * Nighttime hours (19:00–07:00) are intentionally excluded because that is when
+ * electric vehicles are typically charged, creating large consumption spikes that
+ * are unrelated to temperature and would corrupt the slope.
  * Nighttime consumption estimation falls back to yesterday's data (see consumption.js).
  *
- * Future enhancement: detect EV charging sessions from consumption spikes and exclude
- * those individual readings from the regression even during daytime, once enough data
- * exists to distinguish baseline from charging load.
+ * Future enhancement: detect EV charging sessions from anomalous consumption spikes
+ * and exclude those individual readings from the regression, once enough data exists
+ * to estimate a per-hour baseline and standard deviation.
  *
- * Coefficients are stored in the consumption_model table and refreshed hourly.
- * A minimum of MIN_SAMPLES data points per hour is required before a model is written.
+ * The fitted coefficients are stored as a single 'daytime' row in consumption_model
+ * and refreshed hourly via learnPipeline in scheduler.js.
  */
 
-import { getConsumptionHistoryForHour, upsertConsumptionModel } from './db.js';
+import { getDaytimeConsumptionHistory, upsertConsumptionModel } from './db.js';
 import log from './logger.js';
 
-const MIN_SAMPLES    = 10;  // need at least 10 days of data per hour before trusting the fit
-const DAYTIME_START  = 8;   // first hour to model (inclusive)
-const DAYTIME_END    = 18;  // last hour to model (inclusive) — nighttime excluded (EV charging)
+const MIN_SAMPLES = 50;  // ~5 days × 11 daytime hours — enough for a stable regression line
 
 /**
  * Compute ordinary least-squares linear regression for arrays xs, ys.
@@ -46,7 +47,7 @@ function ols(xs, ys) {
     ssYY += dy * dy;
   }
 
-  if (ssXX === 0) return null; // all same temperature — can't fit a line
+  if (ssXX === 0) return null; // all readings at same temperature — can't fit a line
 
   const slope     = ssXY / ssXX;
   const intercept = yMean - slope * xMean;
@@ -54,8 +55,7 @@ function ols(xs, ys) {
   // R² = 1 – SS_residual / SS_total
   let ssRes = 0;
   for (let i = 0; i < n; i++) {
-    const pred = slope * xs[i] + intercept;
-    ssRes += (ys[i] - pred) ** 2;
+    ssRes += (ys[i] - (slope * xs[i] + intercept)) ** 2;
   }
   const rSquared = ssYY > 0 ? Math.max(0, 1 - ssRes / ssYY) : 0;
 
@@ -63,40 +63,34 @@ function ols(xs, ys) {
 }
 
 /**
- * Rebuild consumption_model for all 24 hours from historical consumption_readings.
- * Skips hours with fewer than MIN_SAMPLES (10) temperature+consumption pairs.
+ * Fit a single linear model to all daytime (08–18) consumption + temperature readings.
+ * Stores result in consumption_model as model_key='daytime'.
  * Called hourly via learnPipeline in scheduler.js.
  */
 export function learnConsumptionModel() {
-  let updated = 0;
-  let skipped = 0;
-  const r2Log = [];
+  const rows = getDaytimeConsumptionHistory();
 
-  for (let h = DAYTIME_START; h <= DAYTIME_END; h++) {
-    const rows = getConsumptionHistoryForHour(h);
-
-    if (rows.length < MIN_SAMPLES) {
-      skipped++;
-      continue;
-    }
-
-    const xs = rows.map(r => r.outdoor_temp);
-    const ys = rows.map(r => r.consumption_w);
-
-    const fit = ols(xs, ys);
-    if (!fit) { skipped++; continue; }
-
-    upsertConsumptionModel(h, fit.slope, fit.intercept, fit.n, fit.rSquared);
-    updated++;
-
-    r2Log.push(`h${String(h).padStart(2,'0')} R²=${fit.rSquared.toFixed(2)} slope=${fit.slope.toFixed(0)}W/°C n=${fit.n}`);
+  if (rows.length < MIN_SAMPLES) {
+    log.info('consumption-model', `Not enough data yet — ${rows.length}/${MIN_SAMPLES} daytime samples (need ~${Math.ceil(MIN_SAMPLES / 11)} days)`);
+    return;
   }
 
-  const total = DAYTIME_END - DAYTIME_START + 1;
-  if (updated > 0) {
-    log.info('consumption-model', `Updated ${updated}/${total} daytime hours (skipped ${skipped} with <${MIN_SAMPLES} samples)`);
-    log.info('consumption-model', r2Log.join(' | '));
-  } else {
-    log.info('consumption-model', `Not enough data yet — need ${MIN_SAMPLES} days per daytime hour (currently ${skipped}/${total} below threshold)`);
+  const xs = rows.map(r => r.outdoor_temp);
+  const ys = rows.map(r => r.consumption_w);
+
+  const fit = ols(xs, ys);
+  if (!fit) {
+    log.warn('consumption-model', 'OLS failed — all readings at identical temperature');
+    return;
+  }
+
+  upsertConsumptionModel(fit.slope, fit.intercept, fit.n, fit.rSquared);
+
+  log.info('consumption-model',
+    `Daytime model: slope=${fit.slope.toFixed(0)} W/°C  intercept=${fit.intercept.toFixed(0)} W  R²=${fit.rSquared.toFixed(2)}  n=${fit.n}`
+  );
+
+  if (fit.rSquared < 0.3) {
+    log.warn('consumption-model', `Low R²=${fit.rSquared.toFixed(2)} — temperature explains little of the variance; check for EV charging or other large variable loads`);
   }
 }
