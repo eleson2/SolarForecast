@@ -129,6 +129,16 @@ THIS MONTH
 DEFERRED — needs more data
 ----------------------------------------------------------------------
 
+[~] EV charging detection in consumption model
+    Nighttime hours (19:00–07:00) are already excluded from the temperature-consumption
+    regression because that is when electric cars are typically charged (see consumption-learner.js).
+    Future enhancement: detect EV charging sessions from anomalous daytime consumption spikes
+    and exclude those individual readings from the regression, so outliers don't corrupt the slope.
+    Approach: flag readings where consumption_w > baseline + N×σ for that hour, mark them
+    in consumption_readings (add 'ev_charging' source or a separate flag column), exclude
+    flagged rows from learnConsumptionModel().
+    Revisit after 3+ months when a baseline σ per hour can be estimated from the data.
+
 [~] Cloud cover weighting in learner
     Revisit after 6+ weeks. Irradiance weighting may be sufficient.
     If still noisy at 50-150 W/m², add: weight *= (1 - cloud_cover/100)

@@ -3,12 +3,13 @@ import basicAuth from 'express-basic-auth';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
-import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange, getAllPipelineRuns, getSolarMAE } from './db.js';
+import { getReadingsForForecast, getSolarReadingsForRange, getPricesForRange, getAllPipelineRuns, getSolarMAE, getAllConsumptionModels } from './db.js';
 import batteryRouter from './battery-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+app.use(express.json());
 
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in the configured timezone.
@@ -129,6 +130,22 @@ app.get('/api/metrics', (req, res) => {
       note: 'Mean absolute error between prod_forecast and prod_actual (kWh), irr > 50 W/m² only',
     },
     sample_counts: { last_7_days: mae7.n, last_30_days: mae30.n },
+  });
+});
+
+// Consumption temperature model — per-hour OLS regression coefficients
+app.get('/api/consumption-model', (req, res) => {
+  const rows = getAllConsumptionModels();
+  res.json({
+    note: 'Linear model: consumption_w = slope * outdoor_temp + intercept. Daytime hours (08–18) typically show strongest correlation.',
+    hours: rows.map(r => ({
+      hour: r.hour_of_day,
+      slope_w_per_c:  r.slope    != null ? Math.round(r.slope)    : null,
+      intercept_w:    r.intercept != null ? Math.round(r.intercept) : null,
+      r_squared:      r.r_squared != null ? Math.round(r.r_squared * 100) / 100 : null,
+      sample_count:   r.sample_count,
+      last_updated:   r.last_updated,
+    })),
   });
 });
 

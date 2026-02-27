@@ -58,6 +58,22 @@ export function validateConfig(cfg) {
   need(typeof cfg.price.region === 'string' && cfg.price.region.length > 0,
     'price.region must be a non-empty string');
 
+  // --- peak_shaving (optional, validate if enabled) ---
+  if (cfg.peak_shaving?.enabled) {
+    finite(cfg.peak_shaving.default_kw, 'peak_shaving.default_kw');
+    need(cfg.peak_shaving.default_kw > 0, 'peak_shaving.default_kw must be positive');
+    for (const entry of (cfg.peak_shaving.schedule || [])) {
+      need(typeof entry.from === 'string' && /^\d{2}:\d{2}$/.test(entry.from),
+        `peak_shaving.schedule entry.from must be "HH:MM" (got ${JSON.stringify(entry.from)})`);
+      need(typeof entry.to === 'string' && /^\d{2}:\d{2}$/.test(entry.to),
+        `peak_shaving.schedule entry.to must be "HH:MM" (got ${JSON.stringify(entry.to)})`);
+      need(entry.from < entry.to,
+        `peak_shaving.schedule entry: from (${entry.from}) must be before to (${entry.to})`);
+      finite(entry.limit_kw, 'peak_shaving.schedule entry.limit_kw');
+      need(entry.limit_kw > 0, 'peak_shaving.schedule entry.limit_kw must be positive');
+    }
+  }
+
   // --- inverter (optional section, but validate if present) ---
   if (cfg.inverter?.brand) {
     need(KNOWN_INVERTER_BRANDS.includes(cfg.inverter.brand),

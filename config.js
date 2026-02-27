@@ -68,6 +68,17 @@ export default {
         // token: '',
         // device_sn: '',
     },
+    peak_shaving: {
+        // Grid import power cap written to inverter holding register 800 (PeakShavingPower).
+        // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Set enabled: true to activate.
+        enabled: false,
+        default_kw: 4.5,
+        schedule: [
+            // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
+            // { from: '00:00', to: '06:45', limit_kw: 10 },
+            // { from: '21:05', to: '23:59', limit_kw: 10 },
+        ],
+    },
     dashboard: {
         // HTTP basic auth for remote access. Leave auth_pass empty to disable.
         // WARNING: HTTP only — do not expose to the internet without a TLS reverse proxy.

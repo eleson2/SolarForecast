@@ -164,4 +164,29 @@ router.post('/control/charge',    (req, res) => runControl(res, 'charge'));
 router.post('/control/discharge', (req, res) => runControl(res, 'discharge'));
 router.post('/control/idle',      (req, res) => runControl(res, 'idle'));
 
+router.post('/control/peak-shaving', async (req, res) => {
+  const driver = getDriver();
+  if (!driver) return res.status(503).json({ error: 'No inverter configured' });
+  if (typeof driver.setPeakShavingTarget !== 'function') {
+    return res.status(501).json({ error: "Driver does not support 'setPeakShavingTarget'" });
+  }
+  const limit_kw = Number(req.body?.limit_kw);
+  if (!isFinite(limit_kw) || limit_kw <= 0) {
+    return res.status(400).json({ error: 'limit_kw must be a positive number' });
+  }
+  const cfg = getDriverConfig();
+  try {
+    const result = await driver.setPeakShavingTarget(limit_kw, cfg);
+    res.json({
+      action: 'peak-shaving',
+      target_kw: result.target_kw,
+      reg_value: result.reg_value,
+      dry_run: cfg.dry_run ?? false,
+      note: 'Override active until next scheduled execute cycle (~15 min)',
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 export default router;

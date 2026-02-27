@@ -25,6 +25,7 @@ import ModbusRTU from 'modbus-serial';
 const REG = {
   // Holding registers (writable)
   LOAD_FIRST_STOP_SOC: 3310,    // Peak shaving reserve — battery stops discharging to load at this SOC
+  PEAK_SHAVING_POWER:  800,     // Grid import power cap (0.1 kW/unit; value 45 = 4.5 kW)
   CHARGE_STOP_SOC:     3048,    // Upper limit — battery stops charging at this SOC
   DISCHARGE_STOP_SOC:  3067,    // Absolute floor — battery never goes below this SOC
 
@@ -355,6 +356,30 @@ export async function idle(cfg) {
     await throttle();
     await conn.writeRegister(REG.LOAD_FIRST_STOP_SOC, target);
     return { soc: state.soc, target };
+  });
+}
+
+/**
+ * Set the grid import power cap (peak shaving limit).
+ * Writes holding register 800 (PeakShavingPower), scale 0.1 kW.
+ * Example: targetKw=4.5 → register value 45.
+ * @param {number} targetKw — desired import limit in kW
+ * @param {object} cfg — inverter config
+ * @returns {Promise<{ target_kw: number, reg_value: number }>}
+ */
+export async function setPeakShavingTarget(targetKw, cfg) {
+  const regValue = Math.round(targetKw * 10);
+  console.log(`[growatt-modbus] setPeakShavingTarget: ${targetKw} kW → reg 800 = ${regValue}`);
+  if (cfg.dry_run) {
+    console.log(`[growatt-modbus] DRY-RUN: would set PeakShavingPower=${regValue} (${targetKw} kW)`);
+    return { target_kw: targetKw, reg_value: regValue };
+  }
+  return withReconnect(async () => {
+    const conn = await getConnection(cfg);
+    await throttle();
+    await conn.writeRegister(REG.PEAK_SHAVING_POWER, regValue);
+    console.log(`[growatt-modbus] Set PeakShavingPower=${regValue} (${targetKw} kW)`);
+    return { target_kw: targetKw, reg_value: regValue };
   });
 }
 

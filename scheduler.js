@@ -4,6 +4,7 @@ import { fetchWeather } from './src/fetcher.js';
 import { parseWeatherData } from './src/parser.js';
 import { runModel } from './src/model.js';
 import { runLearner } from './src/learner.js';
+import { learnConsumptionModel } from './src/consumption-learner.js';
 import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
@@ -44,6 +45,7 @@ async function fetchPipeline() {
 function learnPipeline() {
   try {
     runLearner();
+    learnConsumptionModel();
     recordPipelineRun('learn');
   } catch (err) {
     log.error('learn', 'Learn pipeline error', err);
@@ -224,6 +226,17 @@ async function consumptionPipeline() {
   }
 }
 
+// Returns the peak shaving limit (kW) for the given "YYYY-MM-DDTHH:MM" timestamp,
+// or null if peak shaving is disabled / not configured.
+function getPeakShavingLimit(psConfig, slotTs) {
+  if (!psConfig?.enabled) return null;
+  const hhmm = slotTs.slice(11, 16); // extract HH:MM
+  for (const entry of (psConfig.schedule || [])) {
+    if (hhmm >= entry.from && hhmm <= entry.to) return entry.limit_kw;
+  }
+  return psConfig.default_kw;
+}
+
 // --- Inverter execution pipeline ---
 
 async function executePipeline() {
@@ -263,6 +276,14 @@ async function executePipeline() {
 
     const result = await driver.applySchedule(futureSlots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
+
+    // Apply peak shaving limit for the current time slot (if enabled)
+    const psLimit = getPeakShavingLimit(config.peak_shaving, fromTs);
+    if (psLimit !== null && typeof driver.setPeakShavingTarget === 'function') {
+      await driver.setPeakShavingTarget(psLimit, cfg);
+      log.info('execute', `Peak shaving limit set: ${psLimit} kW`);
+    }
+
     recordPipelineRun('execute');
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);

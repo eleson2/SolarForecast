@@ -68,6 +68,18 @@ price: {
 }
 ```
 
+Optional: enable peak shaving (grid import cap via inverter register 800):
+```js
+peak_shaving: {
+    enabled: true,
+    default_kw: 4.5,       // default cap in kW
+    schedule: [
+        { from: '00:00', to: '06:45', limit_kw: 10 },  // higher limit overnight
+        { from: '21:05', to: '23:59', limit_kw: 10 },
+    ],
+}
+```
+
 Config is validated at startup — misconfigurations produce a clear error and
 exit immediately rather than failing silently inside a pipeline.
 
@@ -174,6 +186,7 @@ dashboard: {
 |---|---|
 | `GET /health` | Pipeline run status and overdue detection |
 | `GET /api/metrics` | Solar forecast MAE (7d / 30d) |
+| `GET /api/consumption-model` | Per-hour temperature→consumption regression coefficients and R² |
 | `GET /api/solar` | Solar readings: last 7 days + next 2 days |
 | `GET /api/prices` | Spot prices: next 48 hours |
 | `GET /battery/schedule` | Active 24 h battery schedule + savings estimate |
@@ -182,6 +195,7 @@ dashboard: {
 | `POST /battery/control/charge` | Force battery to charge (sets SOC floor to charge_soc) |
 | `POST /battery/control/discharge` | Allow battery to discharge (sets SOC floor to discharge_soc) |
 | `POST /battery/control/idle` | Hold battery at current SOC |
+| `POST /battery/control/peak-shaving` | Set grid import cap: `{"limit_kw": 4.5}` |
 
 Manual overrides via the control endpoints last until the next 15-minute
 execute cycle resumes schedule-based control.

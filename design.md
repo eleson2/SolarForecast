@@ -40,9 +40,10 @@ Battery charge/discharge optimization is handled by the Battery Optimizer module
 | `run-once.js`      | Done        | One-shot pipeline, writes `data/forecast.json`     |
 | Fallback strategy  | Not started | Use previous irradiance when API is unavailable    |
 | Actuals ingestion  | Done        | `snapshotPipeline` polls daily energy totals every 15 min; `consumptionPipeline` derives hourly deltas → `prod_actual` + `consumption_readings` |
-| Modbus TCP driver  | Done        | `growatt-modbus` — local Modbus TCP for MOD TL3-XH, SOC buffer control |
+| Modbus TCP driver  | Done        | `growatt-modbus` — local Modbus TCP for MOD TL3-XH, SOC buffer control + peak shaving |
 | Data-collection mode | Done      | `config.inverter.data_collection_only = true` disables inverter dispatch; all data collection continues |
 | Yesterday PV fallback | Done     | `model.js` seeds correction factor from last recorded actual for the same hour when matrix is empty |
+| Consumption model     | Done     | `consumption-learner.js` — OLS regression (slope W/°C + intercept per hour-of-day) learned from `consumption_readings`; used by `consumption.js` when ≥10 samples/hour exist |
 
 ---
 

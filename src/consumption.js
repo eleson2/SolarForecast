@@ -1,5 +1,5 @@
 import config from '../config.js';
-import { getConsumptionForRange } from './db.js';
+import { getConsumptionForRange, getConsumptionModelForHour } from './db.js';
 
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
@@ -72,27 +72,44 @@ export async function estimateConsumption() {
       `${todayDateStr}T00:00`
     );
 
-    if (yesterdayData.length > 0) {
-      // Fetch temperatures for correction
-      let temps;
-      try {
-        temps = await fetchTemperatures();
-      } catch (err) {
-        console.log(`[consumption] Temperature fetch failed, skipping correction: ${err.message}`);
-        temps = null;
-      }
+    // Always fetch temperatures — needed by both model and yesterday-based paths
+    let temps;
+    try {
+      temps = await fetchTemperatures();
+    } catch (err) {
+      console.log(`[consumption] Temperature fetch failed, skipping correction: ${err.message}`);
+      temps = null;
+    }
 
-      // Build lookup: hour (0-23) → consumption_w
-      const yesterdayByHour = new Map();
-      for (const row of yesterdayData) {
-        const hour = parseInt(row.hour_ts.slice(11, 13), 10);
-        yesterdayByHour.set(hour, { w: row.consumption_w, temp: row.outdoor_temp });
-      }
+    // Build lookup: hour (0-23) → yesterday's {w, temp}
+    const yesterdayByHour = new Map();
+    for (const row of yesterdayData) {
+      const hour = parseInt(row.hour_ts.slice(11, 13), 10);
+      yesterdayByHour.set(hour, { w: row.consumption_w, temp: row.outdoor_temp });
+    }
+
+    if (yesterdayData.length > 0) {
+      let modelHours = 0;
+      let yesterdayHours = 0;
 
       for (let h = 0; h < 24; h++) {
         const hStr = String(h).padStart(2, '0');
         const hourTs = `${todayDateStr}T${hStr}:00`;
+        const forecastTemp = temps?.get(hourTs) ?? null;
 
+        // --- Path 1: learned regression model ---
+        // Use when a model with sufficient samples exists AND forecast temp is available.
+        const model = getConsumptionModelForHour(h);
+        if (model && forecastTemp !== null) {
+          const predicted = Math.round(model.slope * forecastTemp + model.intercept);
+          // Clamp to a plausible range (never below 100 W, never above 3× flat_watts)
+          const clamped = Math.max(100, Math.min(config.consumption.flat_watts * 3, predicted));
+          estimates.push({ hour_ts: hourTs, consumption_w: clamped });
+          modelHours++;
+          continue;
+        }
+
+        // --- Path 2: yesterday's value + temperature correction ---
         const yesterdayEntry = yesterdayByHour.get(h);
         if (!yesterdayEntry) {
           estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
@@ -100,15 +117,12 @@ export async function estimateConsumption() {
         }
 
         let factor = 1.0;
-        if (temps) {
-          const todayTemp = temps.get(hourTs);
+        if (temps && forecastTemp !== null) {
           const yesterdayHourTs = `${yesterdayDateStr}T${hStr}:00`;
           const yesterdayTemp = yesterdayEntry.temp ?? temps.get(yesterdayHourTs);
-
-          if (todayTemp != null && yesterdayTemp != null) {
-            const tempDiff = todayTemp - yesterdayTemp;
+          if (yesterdayTemp != null) {
+            const tempDiff = forecastTemp - yesterdayTemp;
             const sensitivity = config.consumption.heating_sensitivity;
-            // Heating climate: colder → more consumption
             factor = config.consumption.climate === 'heating'
               ? 1.0 - (tempDiff * sensitivity)
               : 1.0 + (tempDiff * sensitivity);
@@ -120,9 +134,13 @@ export async function estimateConsumption() {
           hour_ts: hourTs,
           consumption_w: Math.round(yesterdayEntry.w * factor),
         });
+        yesterdayHours++;
       }
 
-      console.log(`[consumption] Estimated 24h from yesterday's data (${yesterdayData.length} hours)`);
+      const src = modelHours > 0
+        ? `model(${modelHours}h) + yesterday(${yesterdayHours}h)`
+        : `yesterday(${yesterdayHours}h)`;
+      console.log(`[consumption] Estimated 24h via ${src}`);
       return estimates;
     }
 

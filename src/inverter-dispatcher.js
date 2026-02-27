@@ -13,7 +13,8 @@ const drivers = { growatt, 'growatt-modbus': growattModbus };
 
 /**
  * @returns {{ getState: Function, applySchedule: Function, resetToDefault: Function,
- *             charge: Function, discharge: Function, idle: Function } | null}
+ *             charge: Function, discharge: Function, idle: Function,
+ *             setPeakShavingTarget: Function } | null}
  */
 export function getDriver() {
   const brand = config.inverter?.brand;
