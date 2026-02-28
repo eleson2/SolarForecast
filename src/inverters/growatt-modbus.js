@@ -263,17 +263,21 @@ export async function applySchedule(slots, cfg) {
   const intent = ACTION_TO_SOC_INTENT[currentSlot.action] ?? 'idle';
   let targetSoc;
 
+  const dischargeSoc = cfg.discharge_soc ?? 20;
+
   if (intent === 'charge') {
     targetSoc = cfg.charge_soc ?? 90;
   } else if (intent === 'discharge') {
-    targetSoc = cfg.discharge_soc ?? 20;
+    targetSoc = dischargeSoc;
   } else {
-    // idle: read current SOC and hold there
+    // idle: hold at current SOC, but never set the floor below discharge_soc.
+    // If the battery is already below the configured minimum, protect it by
+    // setting the floor to discharge_soc rather than locking in the low value.
     const state = await getState(cfg);
-    targetSoc = state.soc;
+    targetSoc = Math.max(state.soc, dischargeSoc);
   }
 
-  targetSoc = Math.max(13, Math.min(100, targetSoc));
+  targetSoc = Math.max(dischargeSoc, Math.min(100, targetSoc));
 
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
@@ -345,8 +349,9 @@ export async function discharge(cfg) {
  */
 export async function idle(cfg) {
   const state = await getState(cfg);
-  const target = state.soc;
-  console.log(`[growatt-modbus] idle: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}% (hold)`);
+  const dischargeSoc = cfg.discharge_soc ?? 20;
+  const target = Math.max(state.soc, dischargeSoc);
+  console.log(`[growatt-modbus] idle: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}% (hold, floor=${dischargeSoc}%)`);
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
     return { soc: state.soc, target };
