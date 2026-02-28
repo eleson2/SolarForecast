@@ -66,6 +66,16 @@ DEFERRED — needs more data
     manual config — e.g. flag readings > median + 2×IQR per daytime hour.
     Revisit after 3+ months when enough data exists to estimate a robust per-hour baseline.
 
+[ ] Auto-detect EV charging threshold
+    Replace (or cross-validate) the manual consumption.max_house_w with a data-driven
+    threshold derived from the accumulated consumption_readings:
+    - For each daytime hour, compute median and IQR across all recorded days
+    - Flag a reading as EV-contaminated if consumption_w > median + 2×IQR
+    - Use the auto-detected threshold to filter getDaytimeConsumptionHistory()
+      (fall back to max_house_w config if insufficient data for IQR estimate)
+    - Log flagged hours so the user can verify detection is working
+    Prerequisite: at least 4 weeks of daytime readings (≥ 28 samples per hour).
+
 [~] Cloud cover weighting in learner
     Revisit after 6+ weeks. Irradiance weighting may be sufficient.
     If still noisy at 50-150 W/m², add: weight *= (1 - cloud_cover/100)
