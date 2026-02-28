@@ -44,6 +44,12 @@ export default {
         heating_sensitivity: 0.03,
         climate: 'heating',
         flat_watts: 800,
+        // Set to maximum expected house consumption WITHOUT EV charging (watts).
+        // Any hourly reading above this is excluded from the temperature model,
+        // preventing EV charging sessions from corrupting the regression slope.
+        // Rule of thumb: peak heating load + all appliances, but not the EV charger.
+        // Example: 5000 covers a well-heated Swedish home; set to 0 to disable.
+        max_house_w: 5000,
     },
     inverter: {
         // Driver: 'growatt' = cloud API (MIN/MIX), 'growatt-modbus' = local Modbus TCP (MOD TL3-XH)

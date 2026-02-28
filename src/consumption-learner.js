@@ -22,6 +22,7 @@
  * and refreshed hourly via learnPipeline in scheduler.js.
  */
 
+import config from '../config.js';
 import { getDaytimeConsumptionHistory, upsertConsumptionModel } from './db.js';
 import log from './logger.js';
 
@@ -68,10 +69,18 @@ function ols(xs, ys) {
  * Called hourly via learnPipeline in scheduler.js.
  */
 export function learnConsumptionModel() {
-  const rows = getDaytimeConsumptionHistory();
+  const maxHouseW = config.consumption?.max_house_w || 1e9;
+  const rows = getDaytimeConsumptionHistory(maxHouseW);
+
+  // Count how many daytime readings were excluded above the threshold
+  const allRows = getDaytimeConsumptionHistory(1e9);
+  const excluded = allRows.length - rows.length;
+  if (excluded > 0) {
+    log.info('consumption-model', `Excluded ${excluded} readings above ${maxHouseW}W threshold (likely EV charging)`);
+  }
 
   if (rows.length < MIN_SAMPLES) {
-    log.info('consumption-model', `Not enough data yet — ${rows.length}/${MIN_SAMPLES} daytime samples (need ~${Math.ceil(MIN_SAMPLES / 11)} days)`);
+    log.info('consumption-model', `Not enough data yet — ${rows.length}/${MIN_SAMPLES} daytime samples after EV filter (need ~${Math.ceil(MIN_SAMPLES / 11)} days)`);
     return;
   }
 

@@ -51,6 +51,12 @@ export function validateConfig(cfg) {
   need(cfg.battery.min_soc < cfg.battery.max_soc,
     `battery.min_soc (${cfg.battery.min_soc}) must be less than battery.max_soc (${cfg.battery.max_soc})`);
 
+  // --- consumption (optional fields) ---
+  if (cfg.consumption?.max_house_w !== undefined && cfg.consumption.max_house_w !== 0) {
+    finite(cfg.consumption.max_house_w, 'consumption.max_house_w');
+    need(cfg.consumption.max_house_w > 0, 'consumption.max_house_w must be positive');
+  }
+
   // --- price ---
   need(cfg.price, 'price section is missing');
   need(KNOWN_PRICE_SOURCES.includes(cfg.price.source),

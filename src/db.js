@@ -529,7 +529,9 @@ export function getSolarMAE(fromTs) {
 // --- Consumption model helpers ---
 
 const consumptionModelStmts = {
-  // All daytime (08–18) readings that have both temp and consumption
+  // All daytime (08–18) readings that have both temp and consumption.
+  // Readings above maxHouseW are excluded (EV charging / other large transient loads).
+  // Pass maxHouseW=Infinity (or a very large number) to disable the filter.
   getDaytimeHistory: db.prepare(`
     SELECT consumption_w, outdoor_temp
     FROM consumption_readings
@@ -538,6 +540,7 @@ const consumptionModelStmts = {
       AND outdoor_temp  IS NOT NULL
       AND consumption_w IS NOT NULL
       AND consumption_w > 0
+      AND consumption_w <= ?
     ORDER BY hour_ts
   `),
 
@@ -559,8 +562,8 @@ const consumptionModelStmts = {
   `),
 };
 
-export function getDaytimeConsumptionHistory() {
-  return consumptionModelStmts.getDaytimeHistory.all();
+export function getDaytimeConsumptionHistory(maxHouseW) {
+  return consumptionModelStmts.getDaytimeHistory.all(maxHouseW ?? 1e9);
 }
 
 export function upsertConsumptionModel(slope, intercept, sampleCount, rSquared) {
