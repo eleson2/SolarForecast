@@ -278,11 +278,12 @@ export async function applySchedule(slots, cfg) {
   } else if (intent === 'discharge') {
     targetSoc = dischargeSoc;
   } else {
-    // idle: hold at current SOC, but never set the floor below discharge_soc.
-    // If the battery is already below the configured minimum, protect it by
-    // setting the floor to discharge_soc rather than locking in the low value.
-    const state = await getState(cfg);
-    targetSoc = Math.max(state.soc, dischargeSoc);
+    // idle/preserve: hold the battery at the optimizer's planned SOC for this slot.
+    // Using soc_start (the planned entry level) rather than live SOC means the
+    // inverter will grid-charge back if loads pull the battery below the planned
+    // level — preserving the charge for the upcoming discharge window.
+    const plannedSoc = currentSlot.soc_start;
+    targetSoc = plannedSoc != null ? Math.max(plannedSoc, dischargeSoc) : dischargeSoc;
   }
 
   targetSoc = Math.round(Math.max(dischargeSoc, Math.min(100, targetSoc)));
