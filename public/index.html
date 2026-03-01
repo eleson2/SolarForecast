@@ -409,16 +409,49 @@ const ACTION_BG = {
   idle:         'rgba(80,80,80,0.25)',
 };
 
+// Compute what MinReservedSOC was written to the inverter for a given schedule slot.
+// Mirrors the logic in applySchedule() in growatt-modbus.js.
+function computeMinReservedSOC(row, invCfg) {
+  const intent = { charge_grid: 'charge', charge_solar: 'charge',
+                   discharge: 'discharge', sell: 'discharge' }[row.action] ?? 'idle';
+  let target;
+  if (intent === 'charge') {
+    target = (row.soc_end != null)
+      ? Math.min(row.soc_end, invCfg.charge_soc)
+      : invCfg.charge_soc;
+  } else if (intent === 'discharge') {
+    target = invCfg.discharge_soc;
+  } else {
+    // idle: max(soc_start, discharge_soc) — soc_start is the planned value at slot start
+    target = Math.max(row.soc_start ?? invCfg.discharge_soc, invCfg.discharge_soc);
+  }
+  return Math.max(invCfg.discharge_soc, Math.min(100, target));
+}
+
+// Compute the peak shaving import limit (kW) for a given slot timestamp.
+function getPeakShavingLimit(slotTs, psCfg) {
+  const hhmm = slotTs.slice(11, 16); // "HH:MM"
+  for (const entry of (psCfg.schedule || [])) {
+    if (hhmm >= entry.from && hhmm < entry.to) return entry.limit_kw;
+  }
+  return psCfg.default_kw;
+}
+
 async function loadHistory() {
   const data = await fetch('/battery/history').then(r => r.json());
-  const { schedule, snapshots } = data;
+  const { schedule, snapshots, inverter_config } = data;
 
   if (!schedule.length) return;
 
-  const labels   = schedule.map(r => fmtTime(r.slot));
-  const socData  = schedule.map(r => r.soc_start ?? null);
-  const priceData = schedule.map(r => r.price_kwh ?? null);
-  const barBg    = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
+  const invCfg = inverter_config ?? { discharge_soc: 20, charge_soc: 90, peak_shaving: { enabled: false, default_kw: 4.5, schedule: [] } };
+  const psCfg  = invCfg.peak_shaving;
+
+  const labels        = schedule.map(r => fmtTime(r.slot));
+  const socData       = schedule.map(r => r.soc_start ?? null);
+  const priceData     = schedule.map(r => r.price_kwh ?? null);
+  const barBg         = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
+  const minSocData    = schedule.map(r => computeMinReservedSOC(r, invCfg));
+  const psData        = schedule.map(r => getPeakShavingLimit(r.slot, psCfg));
 
   // Action counts for note
   const counts = {};
@@ -426,7 +459,7 @@ async function loadHistory() {
   const countStr = Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(', ');
   document.getElementById('savingsNote').textContent =
     `Actions over last 24 h — ${countStr}. ` +
-    `SOC shown at start of each 15-min slot. Price line on right axis.`;
+    `SOC & MinReservedSOC on left axis. Price (SEK/kWh) & PeakShavingLimit (kW) on right axes.`;
 
   destroyChart('history');
   const ctx = document.getElementById('historyChart').getContext('2d');
@@ -441,7 +474,7 @@ async function loadHistory() {
           backgroundColor: barBg,
           borderWidth: 0,
           yAxisID: 'ySoc',
-          order: 3,
+          order: 4,
         },
         {
           type: 'line',
@@ -456,6 +489,18 @@ async function loadHistory() {
         },
         {
           type: 'line',
+          label: 'MinReservedSOC %',
+          data: minSocData,
+          borderColor: '#e08030',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          yAxisID: 'ySoc',
+          order: 2,
+        },
+        {
+          type: 'line',
           label: 'Price SEK/kWh',
           data: priceData,
           borderColor: '#f5c842',
@@ -464,7 +509,19 @@ async function loadHistory() {
           borderWidth: 1.5,
           borderDash: [4, 3],
           yAxisID: 'yPrice',
-          order: 2,
+          order: 3,
+        },
+        {
+          type: 'line',
+          label: `PeakShaving kW${psCfg.enabled ? '' : ' (off)'}`,
+          data: psData,
+          borderColor: '#70d0a0',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [2, 4],
+          yAxisID: 'yPower',
+          order: 3,
         },
       ],
     },
@@ -479,20 +536,22 @@ async function loadHistory() {
         tooltip: {
           callbacks: {
             label: ctx => {
-              if (ctx.datasetIndex === 0) {
-                return `Action: ${schedule[ctx.dataIndex]?.action}`;
-              }
-              return `${ctx.dataset.label}: ${ctx.raw?.toFixed(ctx.datasetIndex === 2 ? 3 : 1)}`;
+              if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
+              if (ctx.datasetIndex === 3) return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
+              if (ctx.datasetIndex === 4) return `PeakShaving: ${ctx.raw?.toFixed(1)} kW${psCfg.enabled ? '' : ' (disabled)'}`;
+              return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             }
           }
         }
       },
       scales: {
-        x: { grid: { color: '#1e2130' }, ticks: { maxTicksLimit: 12, maxRotation: 0 } },
+        x:      { grid: { color: '#1e2130' }, ticks: { maxTicksLimit: 12, maxRotation: 0 } },
         ySoc:   { position: 'left',  min: 0, max: 100, grid: { color: '#1e2130' },
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
+        yPower: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                  title: { display: true, text: 'kW', color: '#70d0a0' } },
       },
     },
   });
