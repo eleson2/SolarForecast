@@ -19,6 +19,7 @@
  */
 
 import ModbusRTU from 'modbus-serial';
+import config from '../../config.js';
 
 // --- Register addresses (empirically verified) ---
 
@@ -253,8 +254,10 @@ export async function getEnergyTotals(cfg) {
 export async function applySchedule(slots, cfg) {
   if (!slots.length) return { applied: 0, skipped: 0 };
 
-  // Find current slot (latest slot whose timestamp is <= now)
-  const now = new Date().toISOString().slice(0, 16);
+  // Find current slot (latest slot whose timestamp is <= now).
+  // Slots are stored in local timezone — use local time, not UTC.
+  const tz = config.location.timezone;
+  const now = new Date().toLocaleString('sv-SE', { timeZone: tz }).replace(' ', 'T').slice(0, 16);
   const currentSlot = [...slots]
     .filter(s => s.slot_ts <= now)
     .sort((a, b) => b.slot_ts.localeCompare(a.slot_ts))[0]
