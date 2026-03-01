@@ -66,6 +66,15 @@ router.get('/schedule', (req, res) => {
   res.json({
     generated_at: now.toISOString(),
     timezone: config.location.timezone,
+    inverter_config: {
+      discharge_soc: config.inverter?.discharge_soc ?? 20,
+      charge_soc:    config.inverter?.charge_soc    ?? 90,
+      peak_shaving: {
+        enabled:    config.peak_shaving?.enabled    ?? false,
+        default_kw: config.peak_shaving?.default_kw ?? 4.5,
+        schedule:   config.peak_shaving?.schedule   ?? [],
+      },
+    },
     schedule: rows.map(r => ({
       slot: r.slot_ts,
       action: r.action,

@@ -150,6 +150,7 @@
   <div class="card wide">
     <h2>Battery Schedule — Next 24 h</h2>
     <div class="summary-row" id="batterySummary"></div>
+    <div class="chart-wrap" style="height:240px; margin-bottom:16px"><canvas id="scheduleChart"></canvas></div>
     <div class="schedule-table-wrap">
       <table>
         <thead>
@@ -354,7 +355,7 @@ async function loadSolar() {
 // --- Battery schedule ---
 async function loadSchedule() {
   const data = await fetch('/battery/schedule').then(r => r.json());
-  const { schedule, summary } = data;
+  const { schedule, summary, inverter_config } = data;
 
   // Summary KPIs
   const s = summary;
@@ -398,6 +399,150 @@ async function loadSchedule() {
   // Scroll current slot into view
   const nowRow = tbody.querySelector('tr.now');
   if (nowRow) nowRow.scrollIntoView({ block: 'center' });
+
+  // Schedule chart
+  const invCfg = inverter_config ?? { discharge_soc: 20, charge_soc: 90, peak_shaving: { enabled: false, default_kw: 4.5, schedule: [] } };
+  const nowTs  = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Stockholm' }).replace(' ', 'T').slice(0, 16);
+
+  const sLabels   = schedule.map(r => fmtHour(r.slot));
+  const sSocData  = schedule.map(r => r.soc_start ?? null);
+  const sMinSoc   = schedule.map(r => computeMinReservedSOC(r, invCfg));
+  const sPriceData = schedule.map(r => r.price_kwh ?? null);
+  const sBarBg    = schedule.map(r => {
+    const base = ACTION_BG[r.action] ?? ACTION_BG.idle;
+    // Dim past slots
+    return r.slot < nowTs ? base.replace(/[\d.]+\)$/, '0.15)') : base;
+  });
+
+  // Vertical "now" line via annotation-free approach: insert a transparent dataset
+  // and use a custom plugin to draw the line
+  const nowIdx = schedule.findIndex(r => r.slot >= nowTs);
+
+  destroyChart('schedule');
+  const sCtx = document.getElementById('scheduleChart').getContext('2d');
+  charts.schedule = new Chart(sCtx, {
+    data: {
+      labels: sLabels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'Action',
+          data: schedule.map(() => 100),
+          backgroundColor: sBarBg,
+          borderWidth: 0,
+          yAxisID: 'ySoc',
+          order: 4,
+        },
+        {
+          type: 'line',
+          label: 'Planned SOC %',
+          data: sSocData,
+          borderColor: '#6ab0ff',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 2,
+          yAxisID: 'ySoc',
+          order: 1,
+        },
+        {
+          type: 'line',
+          label: 'MinReservedSOC %',
+          data: sMinSoc,
+          borderColor: '#e08030',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          yAxisID: 'ySoc',
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Price SEK/kWh',
+          data: sPriceData,
+          borderColor: '#f5c842',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          yAxisID: 'yPrice',
+          order: 3,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: '#aaa', boxWidth: 12,
+          filter: item => item.datasetIndex !== 0 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
+              if (ctx.datasetIndex === 3) return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
+              return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
+            },
+            afterBody: (items) => {
+              const i = items[0]?.dataIndex;
+              const r = schedule[i];
+              if (!r) return [];
+              const lines = [`SOC: ${r.soc_start ?? '—'}% → ${r.soc_end ?? '—'}%`];
+              if (r.solar_watts) lines.push(`Solar: ${r.solar_watts} W`);
+              if (r.consumption_watts) lines.push(`Load: ${r.consumption_watts} W`);
+              return lines;
+            },
+          }
+        },
+        // Draw a vertical "now" line
+        nowLine: {
+          nowIdx,
+          afterDraw(chart) {
+            if (this.nowIdx < 0) return;
+            const meta = chart.getDatasetMeta(1);
+            const pt   = meta.data[this.nowIdx];
+            if (!pt) return;
+            const { ctx, chartArea: { top, bottom } } = chart;
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(pt.x, top);
+            ctx.lineTo(pt.x, bottom);
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.restore();
+          }
+        },
+      },
+      scales: {
+        x:      { grid: { color: '#1e2130' }, ticks: { maxTicksLimit: 12, maxRotation: 0 } },
+        ySoc:   { position: 'left',  min: 0, max: 100, grid: { color: '#1e2130' },
+                  title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
+        yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                  title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
+      },
+    },
+    plugins: [{ id: 'nowLine', afterDraw(chart) {
+      const cfg = chart.options.plugins.nowLine;
+      if (!cfg || cfg.nowIdx < 0) return;
+      const meta = chart.getDatasetMeta(1);
+      const pt   = meta.data[cfg.nowIdx];
+      if (!pt) return;
+      const { ctx, chartArea: { top, bottom } } = chart;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(pt.x, top);
+      ctx.lineTo(pt.x, bottom);
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.restore();
+    }}],
+  });
 }
 
 // --- Last 24h battery history ---
