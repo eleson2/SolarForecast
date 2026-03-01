@@ -95,6 +95,11 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   const maxChargeWh = bat.max_charge_w * slotHours;
   const maxDischargeWh = bat.max_discharge_w * slotHours;
 
+  // Starting SOC (needed for solar-aware headroom calculation below)
+  const startSocWh = options.startSoc != null
+    ? Math.max(minSocWh, Math.min(maxSocWh, (options.startSoc / 100) * capacityWh))
+    : minSocWh;
+
   // Min price spread to justify a charge/discharge cycle
   const avgBuyPrice = slots.reduce((s, sl) => s + sl.buy_price, 0) / slots.length;
   const minSpread = avgBuyPrice * (1 / bat.efficiency - 1);
@@ -119,40 +124,81 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     .filter(i => slots[i].net_production <= 0)
     .sort((a, b) => slots[a].buy_price - slots[b].buy_price);
 
-  // Paired approach: only charge as much as we plan to discharge profitably
-  let chargeSlots = [];
+  // --- Solar-aware grid charging headroom ---
+  // Solar surplus will charge the battery for free. Avoid grid-charging energy
+  // that solar will provide — that wastes both money and solar.
+  //
+  // solarAbsorbWh  = how much solar the battery can actually absorb (limited by room)
+  // gridHeadroomWh = remaining room for grid charging after solar fills its share
+  const solarSurplusWh = slots
+    .filter(s => s.net_production > 0)
+    .reduce((sum, s) => sum + Math.min(s.net_production * slotHours, maxChargeWh), 0);
+  const batteryRoomWh  = maxSocWh - startSocWh;
+  const solarAbsorbWh  = Math.min(solarSurplusWh, batteryRoomWh);
+  const gridHeadroomWh = Math.max(0, batteryRoomWh - solarAbsorbWh);
+  const existAboveMinWh = startSocWh - minSocWh;
+
+  if (solarAbsorbWh > 0) {
+    console.log(`[optimizer] Solar-aware: ${(solarAbsorbWh / 1000).toFixed(1)} kWh expected from solar, ` +
+                `grid headroom ${(gridHeadroomWh / 1000).toFixed(1)} kWh ` +
+                `(was ${(batteryRoomWh / 1000).toFixed(1)} kWh)`);
+  }
+
+  let chargeSlots   = [];
   let dischargeSlots = [];
+  let ci = 0, di = 0;
+  let gridChargedWh = 0;
+  let dischargedWh  = 0;
 
-  let ci = 0;
-  let di = 0;
-  let remainingCapacityWh = maxSocWh - minSocWh;
-  let chargedWh = 0;
-
-  // Pair cheapest charge with most expensive discharge while spread is profitable.
-  // Discharge amount is capped to avoidable_wh — no more than the slot's grid deficit.
-  while (ci < chargeOrder.length && di < dischargeOrder.length && chargedWh < remainingCapacityWh) {
+  // Phase A: pair cheapest grid-charge with most expensive discharge.
+  // Grid charging is capped to gridHeadroomWh — solar fills the rest.
+  while (ci < chargeOrder.length && di < dischargeOrder.length && gridChargedWh < gridHeadroomWh) {
     const cIdx = chargeOrder[ci];
     const dIdx = dischargeOrder[di];
 
-    // Skip if same slot
     if (cIdx === dIdx) { ci++; continue; }
 
     const spread = slots[dIdx].buy_price - slots[cIdx].buy_price;
-    if (spread <= minSpread) break; // No more profitable pairs
+    if (spread <= minSpread) break;
 
-    // Cap to what the discharge slot actually needs and what fits in the battery
-    const dischargeWh = Math.min(slots[dIdx].avoidable_wh, maxDischargeWh, remainingCapacityWh - chargedWh);
-    // Charge must account for round-trip efficiency loss
-    const chargeWh = Math.min(dischargeWh / bat.efficiency, maxChargeWh);
-
+    const dischargeWh = Math.min(slots[dIdx].avoidable_wh, maxDischargeWh,
+                                 (gridHeadroomWh - gridChargedWh) * bat.efficiency);
+    const chargeWh    = Math.min(dischargeWh / bat.efficiency, maxChargeWh,
+                                 gridHeadroomWh - gridChargedWh);
     if (chargeWh <= 0) { di++; continue; }
 
     chargeSlots.push({ idx: cIdx, wh: chargeWh });
     dischargeSlots.push({ idx: dIdx, wh: dischargeWh });
-    chargedWh += chargeWh;
-
+    gridChargedWh += chargeWh;
+    dischargedWh  += dischargeWh;
     ci++;
     di++;
+  }
+
+  // Phase B: plan discharge of solar + existing battery energy at most profitable times.
+  // Solar charges the battery for free; discharge it when prices are high.
+  // Budget = all energy available (existing above min + grid charged + solar absorbed),
+  // minus what Phase A already scheduled for discharge.
+  {
+    const phaseBBudget = Math.max(0, existAboveMinWh + gridChargedWh + solarAbsorbWh - dischargedWh);
+    const alreadyIdx   = new Set(dischargeSlots.map(d => d.idx));
+    let solarDischargedWh = 0;
+
+    for (const dIdx of dischargeOrder) {
+      if (solarDischargedWh >= phaseBBudget) break;
+      if (alreadyIdx.has(dIdx)) continue;
+
+      const dischargeWh = Math.min(slots[dIdx].avoidable_wh, maxDischargeWh,
+                                   phaseBBudget - solarDischargedWh);
+      if (dischargeWh <= 0) continue;
+
+      dischargeSlots.push({ idx: dIdx, wh: dischargeWh });
+      solarDischargedWh += dischargeWh;
+    }
+
+    if (solarDischargedWh > 0) {
+      console.log(`[optimizer] Solar discharge: ${(solarDischargedWh / 1000).toFixed(1)} kWh planned from solar/existing energy`);
+    }
   }
 
   // Apply charge_grid actions
@@ -178,12 +224,10 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   }
 
   // 4. Forward pass: track SOC through the schedule
-  let currentSocWh;
+  let currentSocWh = startSocWh;
   if (options.startSoc != null) {
-    currentSocWh = Math.max(minSocWh, Math.min(maxSocWh, (options.startSoc / 100) * capacityWh));
     console.log(`[optimizer] Starting SOC: ${options.startSoc}% (${Math.round(currentSocWh)}Wh from inverter)`);
   } else {
-    currentSocWh = minSocWh;
     console.log(`[optimizer] Starting SOC: ${bat.min_soc}% (conservative default)`);
   }
 
