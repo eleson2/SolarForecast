@@ -266,7 +266,12 @@ export async function applySchedule(slots, cfg) {
   const dischargeSoc = cfg.discharge_soc ?? 20;
 
   if (intent === 'charge') {
-    targetSoc = cfg.charge_soc ?? 90;
+    // Use the optimizer's planned end SOC for this slot, not the global charge_soc ceiling.
+    // This prevents the inverter from charging beyond what the optimizer intended.
+    const plannedEnd = currentSlot.soc_end;
+    targetSoc = (plannedEnd != null)
+      ? Math.min(plannedEnd, cfg.charge_soc ?? 90)
+      : cfg.charge_soc ?? 90;
   } else if (intent === 'discharge') {
     targetSoc = dischargeSoc;
   } else {
