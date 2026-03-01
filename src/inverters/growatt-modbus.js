@@ -285,7 +285,7 @@ export async function applySchedule(slots, cfg) {
     targetSoc = Math.max(state.soc, dischargeSoc);
   }
 
-  targetSoc = Math.max(dischargeSoc, Math.min(100, targetSoc));
+  targetSoc = Math.round(Math.max(dischargeSoc, Math.min(100, targetSoc)));
 
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
