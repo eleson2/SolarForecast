@@ -25,6 +25,50 @@ function interpolateTo15Min(hourlyData) {
 }
 
 /**
+ * Group an array of slots (already sorted by slot_ts) into contiguous windows
+ * and log each window with its time range, kWh, and average price.
+ */
+function logWindows(label, actionSlots, priceFn, currency) {
+  if (actionSlots.length === 0) return;
+  // Group consecutive 15-min slots into windows
+  const windows = [];
+  let winStart = actionSlots[0];
+  let winSlots = [actionSlots[0]];
+  for (let i = 1; i < actionSlots.length; i++) {
+    const prev = actionSlots[i - 1].slot_ts;
+    const cur  = actionSlots[i].slot_ts;
+    // Two slots are consecutive if their timestamps are exactly 15 min apart.
+    // Compare as strings after normalising: increment last two digits by 15.
+    const [ph, pm] = prev.slice(11, 16).split(':').map(Number);
+    const [ch, cm] = cur.slice(11, 16).split(':').map(Number);
+    const prevMins = ph * 60 + pm;
+    const curMins  = ch * 60 + cm;
+    // Handle day-boundary wrap (e.g. 23:45 → 00:00 next day)
+    const gap = ((curMins - prevMins) + 1440) % 1440;
+    if (gap === 15) {
+      winSlots.push(actionSlots[i]);
+    } else {
+      windows.push({ start: winStart, slots: winSlots });
+      winStart = actionSlots[i];
+      winSlots = [actionSlots[i]];
+    }
+  }
+  windows.push({ start: winStart, slots: winSlots });
+
+  for (const w of windows) {
+    const kWh     = w.slots.reduce((s, sl) => s + sl.watts * 0.25 / 1000, 0);
+    const avgPrice = w.slots.reduce((s, sl) => s + priceFn(sl), 0) / w.slots.length;
+    const fromStr  = w.slots[0].slot_ts.slice(11, 16);
+    const lastSlot = w.slots[w.slots.length - 1];
+    // End label = start of the slot after the last one (human-readable window end)
+    const [lh, lm] = lastSlot.slot_ts.slice(11, 16).split(':').map(Number);
+    const endMins  = lh * 60 + lm + 15;
+    const endStr   = `${String(Math.floor(endMins / 60) % 24).padStart(2, '0')}:${String(endMins % 60).padStart(2, '0')}`;
+    console.log(`[optimizer]   ${label}: ${fromStr}–${endStr}  ${kWh.toFixed(1)} kWh  avg ${avgPrice.toFixed(2)} ${currency}/kWh`);
+  }
+}
+
+/**
  * Run the greedy v1 optimizer.
  * Inputs: solar forecast (from DB), prices (from DB), consumption estimates.
  * Writes schedule to battery_schedule table.
@@ -49,6 +93,14 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
 
   // Solar forecast (hourly) → interpolate to 15-min
   const solarRows = getReadingsForForecast(fromTs, toTs);
+
+  // Log average daytime cloud cover from forecast (hours where irradiance > 0)
+  const daytimeRows = solarRows.filter(r => r.irr_forecast > 0 && r.cloud_cover != null);
+  if (daytimeRows.length > 0) {
+    const avgCloud = Math.round(daytimeRows.reduce((s, r) => s + r.cloud_cover, 0) / daytimeRows.length);
+    console.log(`[optimizer] Cloud cover: avg ${avgCloud}% over ${daytimeRows.length} daytime forecast hours`);
+  }
+
   const solarHourly = solarRows.map(r => ({
     hour_ts: r.hour_ts,
     value: r.prod_forecast != null ? r.prod_forecast * 1000 : 0, // kW → W
@@ -134,14 +186,17 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     .filter(s => s.net_production > 0)
     .reduce((sum, s) => sum + Math.min(s.net_production * slotHours, maxChargeWh), 0);
   const batteryRoomWh  = maxSocWh - startSocWh;
-  const solarAbsorbWh  = Math.min(solarSurplusWh, batteryRoomWh);
+  const solarConfidence    = bat.solar_forecast_confidence ?? 0.7;
+  const minGridReserveWh   = (bat.min_grid_charge_kwh ?? 2.5) * 1000;
+  const solarAbsorbCap     = Math.max(0, batteryRoomWh - minGridReserveWh);
+  const solarAbsorbWh      = Math.min(solarSurplusWh * solarConfidence, solarAbsorbCap);
   const gridHeadroomWh = Math.max(0, batteryRoomWh - solarAbsorbWh);
   const existAboveMinWh = startSocWh - minSocWh;
 
   if (solarAbsorbWh > 0) {
-    console.log(`[optimizer] Solar-aware: ${(solarAbsorbWh / 1000).toFixed(1)} kWh expected from solar, ` +
-                `grid headroom ${(gridHeadroomWh / 1000).toFixed(1)} kWh ` +
-                `(was ${(batteryRoomWh / 1000).toFixed(1)} kWh)`);
+    console.log(`[optimizer] Solar-aware: ${(solarSurplusWh / 1000).toFixed(1)} kWh forecast × ${solarConfidence} confidence ` +
+                `= ${(solarAbsorbWh / 1000).toFixed(1)} kWh credited (cap ${(solarAbsorbCap / 1000).toFixed(1)} kWh), ` +
+                `grid headroom ${(gridHeadroomWh / 1000).toFixed(1)} kWh`);
   }
 
   let chargeSlots   = [];
@@ -337,6 +392,10 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   }
   console.log(`[optimizer] Schedule: ${slots.length} slots — ${JSON.stringify(actionCounts)}`);
   console.log(`[optimizer] Savings: ${summary.estimated_savings} ${currency} (${summary.estimated_cost_without_battery} → ${summary.estimated_cost_with_battery})`);
+
+  // Log charge and discharge windows with price context
+  logWindows('Charge grid', slots.filter(s => s.action === 'charge_grid'), s => s.buy_price, currency);
+  logWindows('Discharge  ', slots.filter(s => s.action === 'discharge'),   s => s.buy_price, currency);
 
   return { schedule: dbRows, summary };
 }

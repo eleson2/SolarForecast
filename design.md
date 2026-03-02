@@ -232,7 +232,8 @@ Stores the raw forecast, model output, actual production, and derived correction
 CREATE TABLE solar_readings (
     id                  INTEGER PRIMARY KEY,
     hour_ts             DATETIME UNIQUE,  -- exact hour, in configured timezone
-    irr_forecast        REAL,             -- W/m², from weather source
+    irr_forecast        REAL,             -- W/m², from weather source (cloud-attenuated)
+    cloud_cover         REAL,             -- 0–100 %, from Open-Meteo (for diagnostics)
     prod_forecast       REAL,             -- kWh, model output (includes recency bias)
     prod_actual         REAL,             -- kWh, from inverter/meter (null until known)
     correction          REAL,             -- prod_actual / prod_forecast (null until known)
@@ -388,10 +389,14 @@ free with no API key required. Example query parameters:
 
 ```
 latitude=57.48&longitude=11.94
-&hourly=shortwave_radiation,direct_radiation,diffuse_radiation
+&hourly=shortwave_radiation,cloud_cover
 &forecast_days=2
 &timezone=Europe/Stockholm
 ```
+
+`shortwave_radiation` is cloud-aware (actual surface irradiance after cloud attenuation).
+`cloud_cover` (0–100 %) is stored alongside the forecast for diagnostic logging — the optimizer
+logs average daytime cloud cover on each run.
 
 Switching source later requires only changes to `fetcher.js` and `parser.js`.
 

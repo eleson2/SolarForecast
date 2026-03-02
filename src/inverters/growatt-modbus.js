@@ -81,6 +81,10 @@ const ACTION_TO_SOC_INTENT = {
 const CONNECT_TIMEOUT_MS = 10_000;  // TCP handshake limit
 const CMD_INTERVAL_MS    = 1_000;   // min gap between Modbus commands
 
+// Retry settings — read once from config so all calls share the same values.
+const MODBUS_RETRIES   = config.inverter?.modbus_retries      ?? 3;
+const MODBUS_RETRY_MS  = config.inverter?.modbus_retry_delay_ms ?? 4000;
+
 let client = null;
 let lastCmd = 0;
 
@@ -120,15 +124,24 @@ async function throttle() {
   lastCmd = Date.now();
 }
 
-// Wrap any driver call so a hung/failed read destroys the client,
-// forcing a fresh TCP connection on the next invocation.
+// Wrap any driver call with automatic retry and reconnect.
+// On each failure the client is destroyed so the next attempt gets a fresh
+// TCP connection (the datalogger sometimes recovers after a brief pause).
 async function withReconnect(fn) {
-  try {
-    return await fn();
-  } catch (err) {
-    destroyClient();
-    throw err;
+  let lastErr;
+  for (let attempt = 1; attempt <= MODBUS_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      destroyClient();
+      lastErr = err;
+      if (attempt < MODBUS_RETRIES) {
+        console.log(`[growatt-modbus] Error (attempt ${attempt}/${MODBUS_RETRIES}): ${err.message} — retry in ${MODBUS_RETRY_MS / 1000}s`);
+        await new Promise(r => setTimeout(r, MODBUS_RETRY_MS));
+      }
+    }
   }
+  throw lastErr;
 }
 
 // --- Driver interface ---

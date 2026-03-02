@@ -31,6 +31,18 @@ export default {
         efficiency: 0.90,
         min_soc: 10,
         max_soc: 95,
+        // Fraction of forecasted solar surplus credited when computing grid charging headroom.
+        // 1.0 = trust forecast fully (blocks grid charging if solar alone can fill battery).
+        // 0.7 = apply 30% discount for forecast uncertainty, clouds, seasonal error.
+        // Lower values charge more from grid as insurance; higher values rely more on solar.
+        solar_forecast_confidence: 0.7,
+        // Minimum kWh of grid charging headroom to preserve regardless of solar forecast.
+        // Ensures the optimizer always plans some cheap-grid charging as insurance against
+        // forecast errors. Set to 0 to disable the floor and rely solely on confidence.
+        min_grid_charge_kwh: 4.0,
+        // If actual SOC falls this many percentage points below the optimizer's plan,
+        // executePipeline overrides the current slot to charge_grid to recover the deficit.
+        soc_deviation_threshold: 10,
     },
     grid: {
         sell_enabled: false,
@@ -61,6 +73,8 @@ export default {
         port: 502,                                // Modbus TCP port (standard)
         unit_id: 1,                               // Modbus slave address (holding reg 30)
         timeout_ms: 5000,                         // Modbus response timeout
+        modbus_retries: 3,                        // retry attempts on Modbus error (1 = no retry)
+        modbus_retry_delay_ms: 4000,              // delay between retries in ms
         dry_run: false,                           // true = log only, false = write registers
         data_collection_only: false,              // true = collect data only, never dispatch schedule to inverter
 

@@ -128,11 +128,14 @@ if (!hasDayOfMonth) {
   `);
 }
 
-// --- Migrate solar_readings: add correction_applied column if missing ---
+// --- Migrate solar_readings: add correction_applied and cloud_cover columns if missing ---
 
 const srColumns = db.prepare("PRAGMA table_info(solar_readings)").all();
 if (!srColumns.some(c => c.name === 'correction_applied')) {
   db.exec(`ALTER TABLE solar_readings ADD COLUMN correction_applied REAL`);
+}
+if (!srColumns.some(c => c.name === 'cloud_cover')) {
+  db.exec(`ALTER TABLE solar_readings ADD COLUMN cloud_cover REAL`);
 }
 
 // --- Migrate correction_matrix: add total_weight column if missing ---
@@ -169,9 +172,11 @@ if (existingCount.cnt === 0) {
 
 const stmts = {
   upsertReading: db.prepare(`
-    INSERT INTO solar_readings (hour_ts, irr_forecast)
-    VALUES (?, ?)
-    ON CONFLICT(hour_ts) DO UPDATE SET irr_forecast = excluded.irr_forecast
+    INSERT INTO solar_readings (hour_ts, irr_forecast, cloud_cover)
+    VALUES (?, ?, ?)
+    ON CONFLICT(hour_ts) DO UPDATE SET
+      irr_forecast = excluded.irr_forecast,
+      cloud_cover  = excluded.cloud_cover
   `),
 
   updateForecast: db.prepare(`
@@ -202,7 +207,7 @@ const stmts = {
   `),
 
   getReadingsForForecast: db.prepare(`
-    SELECT hour_ts, irr_forecast, prod_forecast, confidence
+    SELECT hour_ts, irr_forecast, prod_forecast, confidence, cloud_cover
     FROM solar_readings
     WHERE hour_ts >= ? AND hour_ts < ?
     ORDER BY hour_ts
@@ -271,8 +276,8 @@ const stmts = {
   `),
 };
 
-export function upsertReading(hourTs, irrForecast) {
-  return stmts.upsertReading.run(hourTs, irrForecast);
+export function upsertReading(hourTs, irrForecast, cloudCover = null) {
+  return stmts.upsertReading.run(hourTs, irrForecast, cloudCover);
 }
 
 export function updateForecast(hourTs, prodForecast, confidence, correctionApplied) {

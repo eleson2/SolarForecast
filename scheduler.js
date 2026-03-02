@@ -11,6 +11,7 @@ import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer } from './src/optimizer.js';
 import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
+import { getOverride } from './src/override.js';
 import config from './config.js';
 import app from './src/api.js';
 import log from './src/logger.js';
@@ -25,6 +26,11 @@ try {
 }
 
 const PORT = process.env.PORT || 3000;
+
+// Last SOC successfully read from the inverter.
+// Used as fallback when a live read fails, so Modbus timeouts don't reset the
+// optimizer back to the pessimistic min_soc default.
+let lastKnownSoc = null;
 
 // --- Pipeline functions ---
 
@@ -96,9 +102,15 @@ async function batteryPipeline() {
       try {
         const state = await driver.getState(getDriverConfig());
         options.startSoc = state.soc;
+        lastKnownSoc = state.soc;
         log.info('battery', `Live SOC from inverter: ${state.soc}%`);
       } catch (err) {
-        log.warn('battery', `Could not read inverter SOC: ${err.message}`);
+        if (lastKnownSoc !== null) {
+          options.startSoc = lastKnownSoc;
+          log.warn('battery', `Could not read inverter SOC: ${err.message} — using last known ${lastKnownSoc}%`);
+        } else {
+          log.warn('battery', `Could not read inverter SOC: ${err.message}`);
+        }
       }
     }
 
@@ -249,7 +261,20 @@ async function executePipeline() {
 
     // Read actual SOC
     const state = await driver.getState(cfg);
+    lastKnownSoc = state.soc;
     log.info('execute', `Inverter SOC: ${state.soc}%, power: ${state.power_w}W, mode: ${state.mode}`);
+
+    // If a manual override is active, apply it instead of the schedule.
+    const activeOverride = getOverride();
+    if (activeOverride) {
+      log.info('execute', `Manual override active: ${activeOverride.action}, ${activeOverride.remaining_minutes} min remaining`);
+      if (typeof driver[activeOverride.action] === 'function') {
+        await driver[activeOverride.action](cfg);
+        log.info('execute', `Applied override action: ${activeOverride.action}`);
+      }
+      recordPipelineRun('execute');
+      return;
+    }
 
     // Get schedule for now → +24h
     const now = new Date();
@@ -274,6 +299,22 @@ async function executePipeline() {
       return;
     }
 
+    // SOC deviation guard — if actual SOC is significantly below plan, override to charge_grid.
+    // Catches cases where the battery discharged more than expected (high load, missed charge window).
+    const socDeviationThreshold = config.battery?.soc_deviation_threshold ?? 10;
+    const plannedSoc = slots[0]?.soc_start;
+    const alreadyCharging = futureSlots[0]?.action === 'charge_grid' || futureSlots[0]?.action === 'charge_solar';
+    if (plannedSoc != null && state.soc < plannedSoc - socDeviationThreshold && !alreadyCharging) {
+      const deficit = Math.round(plannedSoc - state.soc);
+      log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — overriding to charge_grid`);
+      futureSlots[0] = {
+        ...futureSlots[0],
+        action: 'charge_grid',
+        watts: config.battery?.max_charge_w ?? 5000,
+        soc_end: plannedSoc,
+      };
+    }
+
     const result = await driver.applySchedule(futureSlots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
@@ -287,6 +328,14 @@ async function executePipeline() {
     recordPipelineRun('execute');
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);
+    // For transient connection failures (timeout, refused) the inverter is likely
+    // still operating correctly on whatever was last written. Resetting would
+    // clobber that state (e.g., interrupt an active charge) for no benefit.
+    const isTransient = /timed out|timeout|ECONNREFUSED|ETIMEDOUT/i.test(err.message);
+    if (isTransient) {
+      log.warn('execute', 'Transient connection error — leaving inverter state unchanged');
+      return;
+    }
     try {
       await driver.resetToDefault(cfg);
       log.info('execute', 'Inverter reset to default after error');

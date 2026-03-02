@@ -2,6 +2,7 @@ import { Router } from 'express';
 import config from '../config.js';
 import { getScheduleForRange, getSnapshotsForRange } from './db.js';
 import { getDriver, getDriverConfig } from './inverter-dispatcher.js';
+import { setOverride, clearOverride, getOverride } from './override.js';
 
 const router = Router();
 
@@ -137,13 +138,65 @@ router.get('/history', (req, res) => {
   });
 });
 
+// --- Manual override ---
+// A persistent override keeps the inverter in a fixed mode (charge/discharge/idle)
+// for a requested duration, surviving scheduled execute cycles.
+// executePipeline in scheduler.js checks getOverride() on every run.
+
+const VALID_OVERRIDE_ACTIONS = ['charge', 'discharge', 'idle'];
+
+router.get('/override', (req, res) => {
+  const active = getOverride();
+  res.json(active ? { active: true, ...active } : { active: false });
+});
+
+router.post('/override', async (req, res) => {
+  const { action, duration_minutes } = req.body ?? {};
+  if (!VALID_OVERRIDE_ACTIONS.includes(action)) {
+    return res.status(400).json({ error: `action must be one of: ${VALID_OVERRIDE_ACTIONS.join(', ')}` });
+  }
+  const duration = Number(duration_minutes);
+  if (!Number.isFinite(duration) || duration < 1 || duration > 1440) {
+    return res.status(400).json({ error: 'duration_minutes must be between 1 and 1440' });
+  }
+
+  const driver = getDriver();
+  if (!driver) return res.status(503).json({ error: 'No inverter configured' });
+  if (typeof driver[action] !== 'function') {
+    return res.status(501).json({ error: `Driver does not support '${action}'` });
+  }
+
+  const cfg = getDriverConfig();
+  try {
+    const result = await driver[action](cfg);
+    setOverride(action, duration);
+    const state = getOverride();
+    res.json({
+      active: true,
+      action,
+      duration_minutes: duration,
+      expires_at: state.expires_at,
+      soc: result.soc,
+      target_soc: result.target,
+      dry_run: cfg.dry_run ?? false,
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+router.delete('/override', (req, res) => {
+  const was = getOverride();
+  clearOverride();
+  res.json({ cancelled: was !== null, previous_action: was?.action ?? null });
+});
+
 // --- Inverter manual control ---
-// Endpoints call the charge/discharge/idle primitives directly, bypassing the
-// schedule. The override lasts until the next scheduled execute cycle (~15 min)
-// restores schedule-based control.
+// One-shot commands: apply immediately, last only until the next execute cycle.
+// For persistent control use /override above.
 //
 // All commands respect dry_run from config. data_collection_only does NOT apply
-// here — manual overrides are always attempted so the user can test independently
+// here — manual commands are always attempted so the user can test independently
 // of the automated schedule.
 
 router.get('/control/status', async (req, res) => {

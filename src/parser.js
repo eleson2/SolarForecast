@@ -14,10 +14,11 @@ export function parseWeatherData(data) {
   for (let i = 0; i < hourly.time.length; i++) {
     const hourTs = hourly.time[i]; // ISO string like "2025-06-15T07:00"
     const irr = hourly.shortwave_radiation[i];
+    const cloud = hourly.cloud_cover?.[i] ?? null; // 0–100 %
 
     if (irr == null) continue;
 
-    upsertReading(hourTs, irr);
+    upsertReading(hourTs, irr, cloud);
     count++;
   }
 

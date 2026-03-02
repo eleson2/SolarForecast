@@ -32,7 +32,7 @@ export async function fetchWeather() {
 
   const url = `https://api.open-meteo.com/v1/forecast`
     + `?latitude=${lat}&longitude=${lon}`
-    + `&hourly=shortwave_radiation,direct_radiation,diffuse_radiation`
+    + `&hourly=shortwave_radiation,cloud_cover`
     + `&forecast_days=2`
     + `&timezone=${encodeURIComponent(config.location.timezone)}`;
 

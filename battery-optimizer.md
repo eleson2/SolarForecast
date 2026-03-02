@@ -26,6 +26,13 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Battery state tracker    | Done        | Integrated in optimizer (SOC forward pass) |
 | Inverter integration     | Growatt MIN + MOD done | See [`inverter-integration.md`](inverter-integration.md) — Cloud API + Modbus TCP drivers |
 | Live SOC seeding         | Done        | Optimizer accepts `options.startSoc` from inverter; scheduler + CLI read SOC before each run |
+| Last-known SOC fallback  | Done        | `lastKnownSoc` in `scheduler.js` — Modbus timeouts no longer reset optimizer to `min_soc` default |
+| Solar forecast confidence| Done        | `battery.solar_forecast_confidence` multiplier + `min_grid_charge_kwh` floor prevent solar forecast from crowding out all grid charging |
+| SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; overrides to `charge_grid` if deficit > `soc_deviation_threshold` |
+| Manual override API      | Done        | `src/override.js` + `GET/POST/DELETE /battery/override` — persists action across 15-min execute cycles |
+| Modbus retry logic       | Done        | `withReconnect()` retries up to `modbus_retries` times with `modbus_retry_delay_ms` delay (config-driven) |
+| Soft transient reset     | Done        | `executePipeline` skips `resetToDefault` for ETIMEDOUT/ECONNREFUSED — leaves inverter in last-written state |
+| Charge/discharge window logging | Done | `logWindows()` in `optimizer.js` groups consecutive slots into time windows with kWh and avg price |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
@@ -126,7 +133,7 @@ instead of the assumed 10%.
 ## Configuration
 
 ```javascript
-// battery-config.js
+// config.js (relevant sections)
 export default {
     battery: {
         capacity_kwh: 10.0,        // usable capacity
@@ -135,6 +142,22 @@ export default {
         efficiency: 0.90,           // round-trip efficiency
         min_soc: 10,                // never go below 10%
         max_soc: 95,                // never charge above 95%
+
+        // Solar forecast confidence — fraction of forecasted solar surplus credited when
+        // computing how much solar will absorb vs how much headroom to leave for grid charging.
+        // 0.7 = apply 30% discount for forecast uncertainty (clouds, seasonal error).
+        // Lower = more grid charging as insurance; higher = rely more on solar.
+        solar_forecast_confidence: 0.7,
+
+        // Minimum kWh of grid charging headroom to preserve regardless of solar forecast.
+        // Prevents large solar forecasts from crowding out all grid charging.
+        // Set to 0 to disable and rely solely on the confidence multiplier.
+        min_grid_charge_kwh: 4.0,
+
+        // SOC deviation guard — if actual SOC falls this many percentage points below the
+        // optimizer's planned soc_start for the current slot, executePipeline overrides
+        // the current slot to charge_grid to recover the deficit.
+        soc_deviation_threshold: 10,
     },
     grid: {
         sell_enabled: false,         // can sell back to grid?
@@ -154,6 +177,12 @@ export default {
         region: 'SE3',              // Provider-specific region code
         currency: 'SEK',            // Display currency
         day_ahead_hour: 13,         // Hour (UTC) when tomorrow's prices publish
+    },
+    inverter: {
+        // ... connection settings ...
+        timeout_ms: 5000,             // Modbus TCP response timeout
+        modbus_retries: 3,            // retry attempts on Modbus error (1 = no retry)
+        modbus_retry_delay_ms: 4000,  // delay between retries in ms
     },
     ev: {
         enabled: false,              // v2 — EV-aware scheduling
@@ -188,6 +217,28 @@ sell_price     = spot_price × sell_factor − transfer_export (per kWh)
 
 The optimizer pairs cheap charge slots with expensive discharge slots, but is
 **solar-aware**: it only charges enough to cover actual grid deficits.
+
+Before pairing, it computes how much of the battery's empty headroom solar is
+expected to fill, and reserves the rest for grid charging:
+
+```
+solarAbsorbWh = min(solarSurplusWh × solar_forecast_confidence,
+                    batteryRoomWh − min_grid_charge_kwh × 1000)
+gridHeadroomWh = max(0, batteryRoomWh − solarAbsorbWh)
+```
+
+- `solar_forecast_confidence` (default 0.7) discounts the forecast to account for
+  uncertainty — clouds, seasonal model errors.
+- `min_grid_charge_kwh` (default 4.0 kWh) is a hard floor: even if the solar forecast
+  is large enough to absorb the entire battery, this many kWh of headroom are always
+  reserved for grid charging.
+
+The optimizer logs this calculation on each run:
+```
+[optimizer] Solar-aware: 17.1 kWh forecast × 0.7 confidence = 3.7 kWh credited
+            (cap 3.7 kWh), grid headroom 4.0 kWh
+[optimizer] Cloud cover: avg 58% over 11 daytime forecast hours
+```
 
 #### Step 1: Compute avoidable energy per slot
 
@@ -590,6 +641,71 @@ Set `dry_run: true` initially. When logs confirm correct behavior, switch to `fa
 
 The driver maintains a lazy singleton TCP connection with automatic reconnect.
 A 1-second throttle between Modbus commands prevents overwhelming the datalogger.
+
+Modbus operations run inside `withReconnect(fn)`, which retries up to `modbus_retries`
+times (config-driven, default 3) with `modbus_retry_delay_ms` delay (default 4 s) between
+attempts. The TCP client is destroyed and recreated on each retry to avoid stale state.
+After all retries are exhausted, the error propagates to the caller.
+
+### Transient error handling
+
+When `executePipeline` catches a Modbus error:
+
+- **Transient** (`ETIMEDOUT`, `ECONNREFUSED`, `timed out`): the inverter likely continued
+  operating on the last-written register value. The pipeline logs a warning and exits
+  **without** calling `resetToDefault` — interrupting an active charge/discharge for no
+  reason would be worse than leaving the inverter alone.
+- **Hard protocol errors**: `resetToDefault` is called as before.
+
+### Last-known SOC fallback
+
+`scheduler.js` maintains a module-level `lastKnownSoc` variable updated on every successful
+`driver.getState()` call in both `batteryPipeline` and `executePipeline`. When a Modbus
+timeout occurs, the optimizer uses `lastKnownSoc` instead of falling back to the pessimistic
+`min_soc` default — which would otherwise cause the solar surplus calculation to assume
+a nearly-empty battery and block all grid charging.
+
+---
+
+## Manual Override API
+
+A persistent override keeps the inverter in a fixed mode for a requested duration,
+surviving multiple 15-minute execute cycles.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/battery/override` | Get current override status |
+| `POST` | `/battery/override` | Set override: `{ action, duration_minutes }` |
+| `DELETE` | `/battery/override` | Cancel active override |
+
+Valid actions: `charge`, `discharge`, `idle`. Duration: 1–1440 minutes.
+
+### Behavior
+
+- On `POST`: the driver action is applied immediately, then an in-memory expiry is set in
+  `src/override.js`. Each `executePipeline` run checks `getOverride()` first — if active,
+  it applies the override action and returns early (skipping schedule dispatch).
+- Overrides expire automatically when `expires_at` is reached.
+- Use the override for manual testing or emergency situations. For normal automation, rely on
+  the schedule.
+
+### SOC Deviation Guard
+
+In addition to the manual override, `executePipeline` includes an automatic reactive
+correction. After computing `futureSlots`, it checks:
+
+```
+if (slots[0].soc_start - state.soc > soc_deviation_threshold) AND (not already charging)
+→ override futureSlots[0] to charge_grid at max_charge_w
+```
+
+This fires when actual battery SOC is significantly below what the optimizer planned —
+e.g. unexpectedly high load during the night. The override lasts one 15-minute slot; the
+subsequent `batteryPipeline` re-plans from the corrected SOC.
+
+Configurable via `config.battery.soc_deviation_threshold` (default: 10 %).
 
 ---
 
