@@ -276,18 +276,24 @@ export async function applySchedule(slots, cfg) {
     .sort((a, b) => b.slot_ts.localeCompare(a.slot_ts))[0]
     ?? slots[0]; // fallback to first
 
-  const intent = ACTION_TO_SOC_INTENT[currentSlot.action] ?? 'idle';
+  const action = currentSlot.action;
+  const intent = ACTION_TO_SOC_INTENT[action] ?? 'idle';
   let targetSoc;
 
   const dischargeSoc = cfg.discharge_soc ?? 20;
 
-  if (intent === 'charge') {
-    // Use the optimizer's planned end SOC for this slot, not the global charge_soc ceiling.
-    // This prevents the inverter from charging beyond what the optimizer intended.
+  if (action === 'charge_grid') {
+    // Force charge to planned end SOC — grid will supplement if solar isn't enough.
     const plannedEnd = currentSlot.soc_end;
     targetSoc = (plannedEnd != null)
       ? Math.min(plannedEnd, cfg.charge_soc ?? 90)
       : cfg.charge_soc ?? 90;
+  } else if (action === 'charge_solar') {
+    // Hold position at soc_start — let solar charge naturally without forcing grid.
+    // Setting floor to soc_end would cause the inverter to grid-charge when solar
+    // alone can't reach the target.
+    const plannedStart = currentSlot.soc_start;
+    targetSoc = plannedStart != null ? Math.max(plannedStart, dischargeSoc) : dischargeSoc;
   } else if (intent === 'discharge') {
     targetSoc = dischargeSoc;
   } else {
