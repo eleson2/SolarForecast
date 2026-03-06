@@ -175,8 +175,13 @@ const stmts = {
     INSERT INTO solar_readings (hour_ts, irr_forecast, cloud_cover)
     VALUES (?, ?, ?)
     ON CONFLICT(hour_ts) DO UPDATE SET
-      irr_forecast = excluded.irr_forecast,
-      cloud_cover  = excluded.cloud_cover
+      irr_forecast       = excluded.irr_forecast,
+      cloud_cover        = excluded.cloud_cover,
+      -- When irradiance updates and no actual has been measured yet, clear the stale
+      -- forecast so the model reruns with the fresh irradiance data.
+      prod_forecast      = CASE WHEN solar_readings.prod_actual IS NOT NULL THEN solar_readings.prod_forecast      ELSE NULL END,
+      confidence         = CASE WHEN solar_readings.prod_actual IS NOT NULL THEN solar_readings.confidence         ELSE NULL END,
+      correction_applied = CASE WHEN solar_readings.prod_actual IS NOT NULL THEN solar_readings.correction_applied ELSE NULL END
   `),
 
   updateForecast: db.prepare(`
@@ -224,7 +229,12 @@ const stmts = {
     SELECT hour_ts, irr_forecast
     FROM solar_readings
     WHERE irr_forecast IS NOT NULL
-      AND (prod_forecast IS NULL OR correction_applied IS NULL)
+      AND (
+        prod_actual IS NULL             -- future/current hours: always reforecast so
+                                        -- correction-matrix and bias updates flow through
+        OR prod_forecast IS NULL        -- past hours never forecasted
+        OR correction_applied IS NULL
+      )
     ORDER BY hour_ts
   `),
 
@@ -297,7 +307,10 @@ export function getUnprocessedActuals() {
 }
 
 export function getReadingsForForecast(fromTs, toTs) {
-  return stmts.getReadingsForForecast.all(fromTs, toTs);
+  // Floor fromTs to the start of the hour so the current partial hour's solar
+  // data is always included (the DB row is keyed on "YYYY-MM-DDTHH:00").
+  const fromHour = fromTs.slice(0, 13) + ':00';
+  return stmts.getReadingsForForecast.all(fromHour, toTs);
 }
 
 export function getSolarReadingsForRange(fromTs, toTs) {

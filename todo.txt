@@ -56,6 +56,48 @@ PENDING
     - Files: test/*.test.js, package.json
 
 ----------------------------------------------------------------------
+PEAK SHAVING + EV CHARGING
+----------------------------------------------------------------------
+
+[ ] Add full peak shaving schedule to config.js
+    - Enable peak_shaving (enabled: true)
+    - Populate schedule array with both time windows:
+        { from: '07:00', to: '20:59', limit_kw: 4.4 }   // active shaving, daytime
+        { from: '21:00', to: '06:59', limit_kw: 10.5 }  // effectively off, EV charging hours
+    - All time boundaries and kW values must live in config, not hardcoded
+    - Files: config.js
+
+[ ] Make optimizer aware of nighttime high-limit window (EV charging hours)
+    - Battery should NOT discharge during 21:00–07:00 when EV is charging;
+      the grid can freely cover load under the 10.5 kW limit — discharging wastes cycles
+    - Options: add allow_discharge flag per schedule window, or let optimizer
+      see correct effective buy cost so it naturally deprioritises discharge
+    - Also verify max_house_w filter correctly excludes EV spikes from overnight
+      consumption estimates used for scheduling
+    - Files: config.js, src/optimizer.js, src/consumption.js
+
+[ ] EV charging detection and schedule integration
+    - Determine detection method:
+        Option A – Passive: if load > threshold (e.g. > 5 kW) during 21:00–07:00
+                   in consumption pipeline, flag as EV session. No extra hardware.
+        Option B – Smart charger API (Easee/Zaptec/Wallbox): read scheduled/active
+                   sessions and feed into consumption estimates.
+        Option C – Manual schedule in config: "EV charges Mon/Wed/Fri 22:00–06:00".
+                   Simplest, not adaptive.
+    - Key question: does EV + house load ever breach the 10.5 kW nighttime limit?
+      If yes, battery must contribute — affects overnight charge strategy.
+    - Files: config.js, src/consumption.js, scheduler.js
+
+[ ] Seasonal peak shaving limit adjustment workflow
+    - Spring/summer: more solar → battery full during day → shaving limit can tighten
+    - Winter: less solar → battery may not be full → looser limit to protect reserve
+    - Consider monthly limit schedule vs manual default_kw adjustment
+    - Note: current peak shaving buffer = 10% × 15 kWh = 1.5 kWh.
+      At 4.4 kW shaving, buffer lasts only ~20 min before grid takes over.
+      Revisit whether buffer size or shaving strategy needs adjustment.
+    - Files: config.js
+
+----------------------------------------------------------------------
 DEFERRED — needs more data
 ----------------------------------------------------------------------
 

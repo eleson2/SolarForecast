@@ -5,7 +5,7 @@ export default {
         timezone: 'Europe/Stockholm'
     },
     panel: {
-        peak_kw: 6.6,
+        peak_kw: 6.5,
         tilt: 38,        // degrees from horizontal
         azimuth: 190,    // 180 = south
         efficiency: 0.19 // starting estimate — learning will correct this
@@ -25,9 +25,9 @@ export default {
         fetch_interval_hours: 6
     },
     battery: {
-        capacity_kwh: 10.0,
-        max_charge_w: 5000,
-        max_discharge_w: 5000,
+        capacity_kwh: 15.0,
+        max_charge_w: 7500,
+        max_discharge_w: 7500,
         efficiency: 0.90,
         min_soc: 10,
         max_soc: 95,
@@ -40,6 +40,11 @@ export default {
         // Ensures the optimizer always plans some cheap-grid charging as insurance against
         // forecast errors. Set to 0 to disable the floor and rely solely on confidence.
         min_grid_charge_kwh: 4.0,
+        // Grid-charge candidates are restricted to slots where solar forecast is below this
+        // watt floor. Any meaningful solar production means the battery will charge for free
+        // via charge_solar — grid-charging competes with that and wastes money.
+        // Night and heavy-overcast slots (≤ threshold W) remain eligible for grid charging.
+        max_solar_for_grid_charge_w: 100,
         // If actual SOC falls this many percentage points below the optimizer's plan,
         // executePipeline overrides the current slot to charge_grid to recover the deficit.
         soc_deviation_threshold: 10,
@@ -47,9 +52,9 @@ export default {
     grid: {
         sell_enabled: false,
         sell_price_factor: 0.80,
-        transfer_import_kwh: 0.05,  // nätavgift import (SEK/kWh)
-        transfer_export_kwh: 0.00,  // nätavgift export (SEK/kWh) — often 0
-        energy_tax_kwh: 0.36,       // energiskatt (SEK/kWh) — only on import
+        transfer_import_kwh: 0.50,  // nätavgift import (SEK/kWh)
+        transfer_export_kwh: 0.50,  // nätavgift export (SEK/kWh) — often 0
+        energy_tax_kwh: 0.0,       // energiskatt (SEK/kWh) — only on import
     },
     consumption: {
         source: 'yesterday',
@@ -92,7 +97,7 @@ export default {
         // Grid import power cap written to inverter holding register 800 (PeakShavingPower).
         // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Set enabled: true to activate.
         enabled: false,
-        default_kw: 4.5,
+        default_kw: 4.4,
         schedule: [
             // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
             // { from: '00:00', to: '06:45', limit_kw: 10 },

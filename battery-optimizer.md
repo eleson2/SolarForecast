@@ -31,6 +31,9 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; overrides to `charge_grid` if deficit > `soc_deviation_threshold` |
 | Manual override API      | Done        | `src/override.js` + `GET/POST/DELETE /battery/override` — persists action across 15-min execute cycles |
 | Modbus retry logic       | Done        | `withReconnect()` retries up to `modbus_retries` times with `modbus_retry_delay_ms` delay (config-driven) |
+| Stale forecast fix       | Done        | `upsertReading` clears `prod_forecast`/`correction_applied` on irradiance update if no `prod_actual` yet; `getReadingsWithoutForecast` always returns future rows so every model run refreshes remaining-day forecasts |
+| Hourly model re-run      | Done        | `learnPipeline` calls `runModel()` after the learner updates the correction matrix — ensures intraday corrections flow into remaining hours within ~1h, not up to 6h |
+| Hour-boundary fix        | Done        | `getReadingsForForecast` floors `fromTs` to hour start so :15/:30/:45 optimizer runs don't miss the current partial hour's solar data |
 | Soft transient reset     | Done        | `executePipeline` skips `resetToDefault` for ETIMEDOUT/ECONNREFUSED — leaves inverter in last-written state |
 | Charge/discharge window logging | Done | `logWindows()` in `optimizer.js` groups consecutive slots into time windows with kWh and avg price |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
@@ -231,7 +234,14 @@ gridHeadroomWh = max(0, batteryRoomWh − solarAbsorbWh)
   uncertainty — clouds, seasonal model errors.
 - `min_grid_charge_kwh` (default 4.0 kWh) is a hard floor: even if the solar forecast
   is large enough to absorb the entire battery, this many kWh of headroom are always
-  reserved for grid charging.
+  reserved for grid charging. **Exception:** if total forecast solar ≥ battery room +
+  total forecast consumption, the floor is waived — solar alone will fill the battery
+  and cover all loads, so grid charging is never needed.
+- `max_solar_for_grid_charge_w` (default 100 W) restricts grid-charge candidate slots
+  to hours where the solar forecast is below this watt threshold. Any slot forecasting
+  more than 100 W of solar is excluded — the battery will charge for free via
+  `charge_solar` so grid-charging there is wasteful. Night and heavy-overcast slots
+  (≤ 100 W) remain eligible.
 
 The optimizer logs this calculation on each run:
 ```
@@ -258,8 +268,11 @@ there wastes stored energy since there's nothing to displace.
 
 - **Discharge candidates**: only slots with `avoidable_wh > 0`, sorted by
   `buy_price` descending (most expensive first)
-- **Charge candidates**: only slots without solar surplus (`net_production ≤ 0`),
-  sorted by `buy_price` ascending (cheapest first)
+- **Charge candidates**: slots where `net_production ≤ 0` AND `solar_watts ≤ consumption_watts × 0.5`
+  (solar covering less than half of load), sorted by `buy_price` ascending (cheapest first).
+  Excluding slots where solar already covers ≥50% of consumption prevents grid charging during
+  the solar ramp-up window — those slots show up cheap in the price sort but grid-charging
+  there competes with free solar and creates scattered short charge windows.
 
 #### Step 3: Pair charge ↔ discharge
 

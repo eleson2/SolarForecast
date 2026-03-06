@@ -52,6 +52,9 @@ function learnPipeline() {
   try {
     runLearner();
     learnConsumptionModel();
+    // Re-run the model for all future hours so that correction-matrix and
+    // recency-bias updates from the learner immediately flow into remaining-day forecasts.
+    runModel();
     recordPipelineRun('learn');
   } catch (err) {
     log.error('learn', 'Learn pipeline error', err);
@@ -299,20 +302,17 @@ async function executePipeline() {
       return;
     }
 
-    // SOC deviation guard — if actual SOC is significantly below plan, override to charge_grid.
-    // Catches cases where the battery discharged more than expected (high load, missed charge window).
+    // SOC deviation guard — if actual SOC is significantly below the planned curve,
+    // trigger a replan so the optimizer can pick the cheapest upcoming slot to recover.
+    // Do NOT hard-override to charge_grid here — the current slot might be expensive;
+    // the optimizer knows how to find a better time (e.g. 1 hour from now).
     const socDeviationThreshold = config.battery?.soc_deviation_threshold ?? 10;
     const plannedSoc = slots[0]?.soc_start;
-    const alreadyCharging = futureSlots[0]?.action === 'charge_grid' || futureSlots[0]?.action === 'charge_solar';
-    if (plannedSoc != null && state.soc < plannedSoc - socDeviationThreshold && !alreadyCharging) {
+    let socDeviated = false;
+    if (plannedSoc != null && state.soc < plannedSoc - socDeviationThreshold) {
       const deficit = Math.round(plannedSoc - state.soc);
-      log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — overriding to charge_grid`);
-      futureSlots[0] = {
-        ...futureSlots[0],
-        action: 'charge_grid',
-        watts: config.battery?.max_charge_w ?? 5000,
-        soc_end: plannedSoc,
-      };
+      log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — triggering replan`);
+      socDeviated = true;
     }
 
     const result = await driver.applySchedule(futureSlots, cfg);
@@ -326,6 +326,7 @@ async function executePipeline() {
     }
 
     recordPipelineRun('execute');
+    return socDeviated;
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);
     // For transient connection failures (timeout, refused) the inverter is likely
@@ -378,13 +379,16 @@ cron.schedule('5 * * * *', () => {
   consumptionPipeline();
 });
 
-// Every 15 min: snapshot → execute → replan
-// Pipelines run sequentially so batteryPipeline sees the post-command SOC.
+// Every 15 min: snapshot → execute.
+// batteryPipeline is NOT run here on every cycle — it runs hourly at :30.
+// The stable hourly SOC curve is what lets the deviation guard detect unexpected drain.
+// Exception: if executePipeline detects a SOC deviation, a replan is triggered immediately
+// so the optimizer can find the cheapest upcoming slot to recover (not a hard charge_grid).
 cron.schedule('*/15 * * * *', async () => {
   await snapshotPipeline();
   if (!config.inverter.data_collection_only) {
-    await executePipeline();
-    await batteryPipeline();
+    const deviated = await executePipeline();
+    if (deviated) await batteryPipeline();
   }
 });
 
@@ -395,7 +399,7 @@ app.listen(PORT, () => {
   log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
 
-// Run initial pipelines on startup (same order as cron: snapshot → battery → execute → replan)
+// Run initial pipelines on startup
 fetchPipeline();
 snapshotPipeline();
 consumptionPipeline();
@@ -403,6 +407,5 @@ consumptionPipeline();
   await batteryPipeline();
   if (!config.inverter.data_collection_only) {
     await executePipeline();
-    await batteryPipeline();
   }
 })();
