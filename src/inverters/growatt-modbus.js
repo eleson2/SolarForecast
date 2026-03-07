@@ -66,16 +66,6 @@ const WORK_MODES = {
   8: 'bat_offline',         // battery, off-grid/EPS
 };
 
-// --- Action → SOC intent mapping ---
-
-const ACTION_TO_SOC_INTENT = {
-  charge_grid:  'charge',
-  charge_solar: 'charge',
-  discharge:    'discharge',
-  sell:         'discharge',
-  idle:         'idle',
-};
-
 // --- Connection management ---
 
 const CONNECT_TIMEOUT_MS = 10_000;  // TCP handshake limit
@@ -277,35 +267,23 @@ export async function applySchedule(slots, cfg) {
     ?? slots[0]; // fallback to first
 
   const action = currentSlot.action;
-  const intent = ACTION_TO_SOC_INTENT[action] ?? 'idle';
-  let targetSoc;
-
+  const chargeSoc    = cfg.charge_soc    ?? 90;
   const dischargeSoc = cfg.discharge_soc ?? 20;
 
+  let targetSoc;
   if (action === 'charge_grid') {
-    // Force charge to planned end SOC — grid will supplement if solar isn't enough.
-    const plannedEnd = currentSlot.soc_end;
-    targetSoc = (plannedEnd != null)
-      ? Math.min(plannedEnd, cfg.charge_soc ?? 90)
-      : cfg.charge_soc ?? 90;
-  } else if (action === 'charge_solar') {
-    // Hold position at soc_start — let solar charge naturally without forcing grid.
-    // Setting floor to soc_end would cause the inverter to grid-charge when solar
-    // alone can't reach the target.
-    const plannedStart = currentSlot.soc_start;
-    targetSoc = plannedStart != null ? Math.max(plannedStart, dischargeSoc) : dischargeSoc;
-  } else if (intent === 'discharge') {
+    // Force grid charging: set floor to max so inverter draws from grid to fill battery.
+    targetSoc = chargeSoc;
+  } else if (action === 'discharge' || action === 'sell') {
+    // Allow discharging down to the minimum floor.
     targetSoc = dischargeSoc;
   } else {
-    // idle/preserve: hold the battery at the optimizer's planned SOC for this slot.
-    // Using soc_start (the planned entry level) rather than live SOC means the
-    // inverter will grid-charge back if loads pull the battery below the planned
-    // level — preserving the charge for the upcoming discharge window.
+    // idle / charge_solar: hold the battery at the optimizer's planned SOC for this slot.
+    // This preserves charge accumulated during a cheap window for a later discharge peak.
+    // charge_solar uses the same hold — solar will push SOC up naturally from here.
     const plannedSoc = currentSlot.soc_start;
     targetSoc = plannedSoc != null ? Math.max(plannedSoc, dischargeSoc) : dischargeSoc;
   }
-
-  targetSoc = Math.round(Math.max(dischargeSoc, Math.min(100, targetSoc)));
 
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);

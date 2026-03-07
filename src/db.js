@@ -226,7 +226,7 @@ const stmts = {
   `),
 
   getReadingsWithoutForecast: db.prepare(`
-    SELECT hour_ts, irr_forecast
+    SELECT hour_ts, irr_forecast, cloud_cover
     FROM solar_readings
     WHERE irr_forecast IS NOT NULL
       AND (
@@ -236,6 +236,18 @@ const stmts = {
         OR correction_applied IS NULL
       )
     ORDER BY hour_ts
+  `),
+
+  getIntradaySolarRatio: db.prepare(`
+    SELECT
+      SUM(prod_actual)   AS actual_sum,
+      SUM(prod_forecast) AS forecast_sum,
+      COUNT(*)           AS sample_count
+    FROM solar_readings
+    WHERE substr(hour_ts, 1, 10) = ?
+      AND prod_actual   IS NOT NULL
+      AND prod_forecast  > 0
+      AND irr_forecast  >= ?
   `),
 
   getCorrectionCell: db.prepare(`
@@ -319,6 +331,17 @@ export function getSolarReadingsForRange(fromTs, toTs) {
 
 export function getReadingsWithoutForecast() {
   return stmts.getReadingsWithoutForecast.all();
+}
+
+/**
+ * Returns the ratio of actual-to-forecast solar production for completed daylight hours
+ * on the given date. Used by the battery optimizer for intra-day correction.
+ * Returns null if fewer than minSamples qualifying hours exist.
+ */
+export function getIntradaySolarRatio(dateStr, minIrr = 10, minSamples = 2) {
+  const row = stmts.getIntradaySolarRatio.get(dateStr, minIrr);
+  if (!row || row.sample_count < minSamples || !row.forecast_sum || row.forecast_sum <= 0) return null;
+  return row.actual_sum / row.forecast_sum;
 }
 
 export function getCorrectionCell(month, dayOfMonth, hourOfDay) {

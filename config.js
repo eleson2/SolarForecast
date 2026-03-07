@@ -18,7 +18,12 @@ export default {
             min_samples: 10,   // minimum total irradiance-weight before activating (else b=1)
             clamp_min: 0.5,    // floor: flag if model is off by more than 2× low
             clamp_max: 2.0,    // ceiling: flag if model is off by more than 2× high
-        }
+        },
+        // Cloud-cover suppression: at 100% cloud cover the forecast is reduced by this fraction.
+        // The correction matrix captures typical conditions; this handles heavy overcast where
+        // irradiance-based models still over-predict even after correction.
+        // 0.65 → 35% of forecast at 100% cloud, 82.5% at 50% cloud, no effect at 0% cloud.
+        cloud_suppression_max: 0.65,
     },
     forecast: {
         horizon_hours: 24,

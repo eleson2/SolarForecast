@@ -106,8 +106,16 @@ export function runModel() {
     const correction = (empiricalWeight * matrixCorrection)
                      + ((1 - empiricalWeight) * fallbackCorrection);
 
-    // Core formula: prod_forecast = peak_kw × (irr_forecast / 1000) × correction × biasScalar
-    const prodForecast = config.panel.peak_kw * (row.irr_forecast / 1000) * correction * biasScalar;
+    // Cloud-cover suppression: heavy overcast days exceed what the correction matrix
+    // expects because the matrix averages over mixed-sky conditions. Scale down
+    // proportionally to cloud cover so 100% cloud applies the full suppression factor.
+    const suppressionMax = config.learning.cloud_suppression_max ?? 0.65;
+    const cloudFactor = (row.cloud_cover != null)
+      ? 1 - (row.cloud_cover / 100) * suppressionMax
+      : 1.0;
+
+    // Core formula: prod_forecast = peak_kw × (irr_forecast / 1000) × correction × biasScalar × cloudFactor
+    const prodForecast = config.panel.peak_kw * (row.irr_forecast / 1000) * correction * biasScalar * cloudFactor;
 
     // Confidence based on irradiance level
     const confidence = Math.min(1.0, row.irr_forecast / config.learning.min_irradiance_weight);

@@ -9,7 +9,7 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer } from './src/optimizer.js';
-import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun } from './src/db.js';
+import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride } from './src/override.js';
 import config from './config.js';
@@ -115,6 +115,16 @@ async function batteryPipeline() {
           log.warn('battery', `Could not read inverter SOC: ${err.message}`);
         }
       }
+    }
+
+    // Intra-day solar correction: if today's actuals diverge from the forecast,
+    // scale remaining forecast hours so the optimizer works with realistic solar numbers.
+    const todayDate = fromTs.slice(0, 10);
+    const rawRatio = getIntradaySolarRatio(todayDate);
+    if (rawRatio !== null) {
+      const clamped = Math.max(0.1, Math.min(3.0, rawRatio));
+      options.intradayScalar = clamped;
+      log.info('battery', `Intra-day solar scalar: ${clamped.toFixed(2)} (actual/forecast=${(rawRatio * 100).toFixed(0)}%)`);
     }
 
     runOptimizer(fromTs, toTs, consumption, options);

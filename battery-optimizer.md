@@ -36,6 +36,8 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Hour-boundary fix        | Done        | `getReadingsForForecast` floors `fromTs` to hour start so :15/:30/:45 optimizer runs don't miss the current partial hour's solar data |
 | Soft transient reset     | Done        | `executePipeline` skips `resetToDefault` for ETIMEDOUT/ECONNREFUSED — leaves inverter in last-written state |
 | Charge/discharge window logging | Done | `logWindows()` in `optimizer.js` groups consecutive slots into time windows with kWh and avg price |
+| Cloud-cover suppression  | Done        | `model.js` applies `cloudFactor = 1 - (cloud_cover/100) * cloud_suppression_max` to every forecast hour; `cloud_suppression_max` (default 0.65) is in `config.learning`; at 100% cloud the forecast is scaled to ~35% of the irradiance-only value |
+| Intra-day solar scalar   | Done        | `batteryPipeline` calls `getIntradaySolarRatio(today)` — ratio of actual-to-forecast for completed daylight hours — and passes it to the optimizer as `options.intradayScalar`; optimizer multiplies remaining-day solar forecast values by this scalar before planning |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |

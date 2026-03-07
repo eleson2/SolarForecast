@@ -101,9 +101,16 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     console.log(`[optimizer] Cloud cover: avg ${avgCloud}% over ${daytimeRows.length} daytime forecast hours`);
   }
 
+  // Intra-day solar correction: scale remaining forecast by today's actual/forecast ratio.
+  const intradayScalar = (options.intradayScalar != null && isFinite(options.intradayScalar))
+    ? options.intradayScalar : 1.0;
+  if (intradayScalar !== 1.0) {
+    console.log(`[optimizer] Intra-day solar scalar: ${intradayScalar.toFixed(2)} applied to remaining forecast`);
+  }
+
   const solarHourly = solarRows.map(r => ({
     hour_ts: r.hour_ts,
-    value: r.prod_forecast != null ? r.prod_forecast * 1000 : 0, // kW → W
+    value: r.prod_forecast != null ? r.prod_forecast * 1000 * intradayScalar : 0, // kW → W
   }));
   const solar15min = interpolateTo15Min(solarHourly);
   const solarMap = new Map(solar15min.map(s => [s.slot_ts, s.value]));
