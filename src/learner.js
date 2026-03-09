@@ -1,3 +1,4 @@
+import config from '../config.js';
 import { getUnprocessedActuals, updateCorrection, getCorrectionCell, updateCorrectionMatrix } from './db.js';
 import { parseTs } from './timeutils.js';
 
@@ -29,13 +30,29 @@ export function runLearner() {
     return 0;
   }
 
+  // Cloud cover threshold above which a sample is excluded from the matrix.
+  // The cloud suppression in model.js already adjusts prod_forecast for heavy overcast,
+  // so the correction = actual/forecast ratio on those days reflects both the panel
+  // behaviour AND the cloud suppression factor. Including such samples would inflate
+  // the matrix, gradually undoing the cloud suppression on clear days.
+  const cloudExcludeThreshold = config.learning.cloud_matrix_exclude_pct ?? 80;
+
   let count = 0;
+  let skippedCloud = 0;
   for (const row of rows) {
     const correction = row.prod_actual / row.prod_forecast;
     const weight = sampleWeight(row.irr_forecast);
 
-    // Store correction on the reading
+    // Always mark the reading as processed so we don't revisit it next hour.
     updateCorrection(row.hour_ts, correction);
+
+    // Skip matrix update for heavy-overcast readings — the forecast was already
+    // cloud-suppressed, so the correction here is artificially close to 1.0 and
+    // would inflate the matrix for that (month, day, hour) cell.
+    if (row.cloud_cover != null && row.cloud_cover >= cloudExcludeThreshold) {
+      skippedCloud++;
+      continue;
+    }
 
     // Update the correction matrix with weighted average
     const { month, day, hour } = parseTs(row.hour_ts);
@@ -59,6 +76,7 @@ export function runLearner() {
     count++;
   }
 
-  console.log(`[learner] Processed ${count} actuals`);
+  const skippedMsg = skippedCloud > 0 ? `, skipped ${skippedCloud} high-cloud` : '';
+  console.log(`[learner] Processed ${count} actuals${skippedMsg}`);
   return count;
 }

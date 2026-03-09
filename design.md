@@ -117,7 +117,14 @@ export default {
             min_samples: 10,   // minimum irr-weight before activating (else b=1)
             clamp_min: 0.5,    // floor — warn if bias below this
             clamp_max: 2.0,    // ceiling — warn if bias above this
-        }
+        },
+        // At 100% cloud cover, forecast is multiplied by (1 - cloud_suppression_max).
+        // 0.65 → 35% of forecast at 100% cloud, 82.5% at 50% cloud, no effect at 0%.
+        cloud_suppression_max: 0.65,
+        // Samples with cloud cover above this % are excluded from the correction matrix.
+        // Heavy-overcast samples already carry the cloud suppression factor in prod_forecast,
+        // so including them would inflate the matrix and partially undo suppression on clear days.
+        cloud_matrix_exclude_pct: 80,
     },
     forecast: {
         horizon_hours: 24,

@@ -32,7 +32,9 @@
       "Bash(curl:*)",
       "Bash(cd:*)",
       "Bash(npm install -g pm2-windows-startup 2>&1 | tail -5 && pm2-startup install 2>&1)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)"
     ]
   }
 }

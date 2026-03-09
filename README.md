@@ -186,19 +186,26 @@ dashboard: {
 |---|---|
 | `GET /health` | Pipeline run status and overdue detection |
 | `GET /api/metrics` | Solar forecast MAE (7d / 30d) |
-| `GET /api/consumption-model` | Per-hour temperature→consumption regression coefficients and R² |
+| `GET /api/consumption-model` | Daytime temperature→consumption regression coefficients and R² |
 | `GET /api/solar` | Solar readings: last 7 days + next 2 days |
 | `GET /api/prices` | Spot prices: next 48 hours |
 | `GET /battery/schedule` | Active 24 h battery schedule + savings estimate |
 | `GET /battery/history` | Last 24 h schedule vs actual energy snapshots |
 | `GET /battery/control/status` | Live SOC, power, and inverter mode |
-| `POST /battery/control/charge` | Force battery to charge (sets SOC floor to charge_soc) |
-| `POST /battery/control/discharge` | Allow battery to discharge (sets SOC floor to discharge_soc) |
-| `POST /battery/control/idle` | Hold battery at current SOC |
-| `POST /battery/control/peak-shaving` | Set grid import cap: `{"limit_kw": 4.5}` |
+| `POST /battery/control/charge` | One-shot: force battery to charge (lasts until next execute cycle, ~15 min) |
+| `POST /battery/control/discharge` | One-shot: allow battery to discharge (lasts until next execute cycle) |
+| `POST /battery/control/idle` | One-shot: hold battery at current SOC (lasts until next execute cycle) |
+| `POST /battery/control/peak-shaving` | One-shot: set grid import cap `{"limit_kw": 4.5}` (lasts until next execute cycle) |
+| `GET /battery/override` | Get current persistent override status |
+| `POST /battery/override` | Set persistent override: `{"action": "charge", "duration_minutes": 60}` — survives multiple execute cycles until it expires |
+| `DELETE /battery/override` | Cancel active persistent override |
 
-Manual overrides via the control endpoints last until the next 15-minute
-execute cycle resumes schedule-based control.
+**One-shot control** (`/battery/control/*`): applies immediately, reverts when the
+next 15-minute execute cycle runs the schedule. Use for quick testing.
+
+**Persistent override** (`/battery/override`): survives multiple execute cycles until
+the requested duration expires. Use when you need the inverter held in a mode for
+longer than 15 minutes. Valid actions: `charge`, `discharge`, `idle`.
 
 ---
 

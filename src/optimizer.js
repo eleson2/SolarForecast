@@ -176,16 +176,13 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     .filter(i => slots[i].avoidable_wh > 0)
     .sort((a, b) => slots[b].buy_price - slots[a].buy_price);
 
-  // Charge candidates: only slots where solar is covering less than half of consumption.
-  // Only allow grid-charging when solar forecast is below a small absolute threshold.
-  // Any meaningful solar production means the battery will charge for free — grid
-  // charging there competes with free solar and wastes money.
-  // (Slots with full solar surplus are already excluded by net_production <= 0.)
-  const maxSolarForGridCharge = bat.max_solar_for_grid_charge_w ?? 100;
+  // Charge candidates: slots where solar does not cover consumption (no free surplus).
+  // Slots with net surplus are excluded (charge_solar handles those for free).
+  // The solar-aware headroom calculation already limits how much we grid-charge
+  // based on expected solar fills — no need to additionally block by solar watts.
   const chargeOrder = slots
     .map((_, i) => i)
-    .filter(i => slots[i].net_production <= 0 &&
-                 slots[i].solar_watts <= maxSolarForGridCharge)
+    .filter(i => slots[i].net_production <= 0)
     .sort((a, b) => slots[a].buy_price - slots[b].buy_price);
 
   // --- Solar-aware grid charging headroom ---
@@ -205,7 +202,7 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   const totalSolarWh       = slots.reduce((sum, s) => sum + s.solar_watts * slotHours, 0);
   const totalConsumptionWh = slots.reduce((sum, s) => sum + s.consumption_watts * slotHours, 0);
   const solarSufficient    = totalSolarWh >= batteryRoomWh + totalConsumptionWh;
-  const minGridReserveWh   = solarSufficient ? 0 : (bat.min_grid_charge_kwh ?? 2.5) * 1000;
+  const minGridReserveWh   = solarSufficient ? 0 : (bat.min_grid_charge_kwh ?? 4.0) * 1000;
 
   const solarAbsorbCap     = Math.max(0, batteryRoomWh - minGridReserveWh);
   const solarAbsorbWh      = Math.min(solarSurplusWh * solarConfidence, solarAbsorbCap);

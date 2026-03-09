@@ -24,6 +24,11 @@ export default {
         // irradiance-based models still over-predict even after correction.
         // 0.65 → 35% of forecast at 100% cloud, 82.5% at 50% cloud, no effect at 0% cloud.
         cloud_suppression_max: 0.65,
+        // Cloud cover % above which a sample is excluded from the correction matrix.
+        // Samples taken on heavy-overcast days carry the cloud suppression factor in
+        // prod_forecast, so including them would inflate the matrix and partially undo
+        // the suppression on subsequent clear days.
+        cloud_matrix_exclude_pct: 80,
     },
     forecast: {
         horizon_hours: 24,
@@ -45,11 +50,6 @@ export default {
         // Ensures the optimizer always plans some cheap-grid charging as insurance against
         // forecast errors. Set to 0 to disable the floor and rely solely on confidence.
         min_grid_charge_kwh: 4.0,
-        // Grid-charge candidates are restricted to slots where solar forecast is below this
-        // watt floor. Any meaningful solar production means the battery will charge for free
-        // via charge_solar — grid-charging competes with that and wastes money.
-        // Night and heavy-overcast slots (≤ threshold W) remain eligible for grid charging.
-        max_solar_for_grid_charge_w: 100,
         // If actual SOC falls this many percentage points below the optimizer's plan,
         // executePipeline overrides the current slot to charge_grid to recover the deficit.
         soc_deviation_threshold: 10,

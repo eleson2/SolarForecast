@@ -399,7 +399,7 @@ export async function setPeakShavingTarget(targetKw, cfg) {
  * @param {object} cfg — inverter config
  */
 export async function resetToDefault(cfg) {
-  const defaultSoc = cfg.discharge_soc ?? 13;
+  const defaultSoc = cfg.discharge_soc ?? 20;
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would reset LoadFirstStopSoc=${defaultSoc}%`);
     return;

@@ -203,7 +203,7 @@ const stmts = {
   `),
 
   getUnprocessedActuals: db.prepare(`
-    SELECT id, hour_ts, irr_forecast, prod_forecast, prod_actual
+    SELECT id, hour_ts, irr_forecast, prod_forecast, prod_actual, cloud_cover
     FROM solar_readings
     WHERE prod_actual IS NOT NULL
       AND correction IS NULL

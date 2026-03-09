@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { validateConfig } from './src/config-validator.js';
 import { fetchWeather } from './src/fetcher.js';
 import { parseWeatherData } from './src/parser.js';
+import { localTs } from './src/timeutils.js';
 import { runModel } from './src/model.js';
 import { runLearner } from './src/learner.js';
 import { learnConsumptionModel } from './src/consumption-learner.js';
@@ -74,29 +75,20 @@ function smoothPipeline() {
 
 // --- Battery optimizer pipeline ---
 
-function localTs(date) {
-  const parts = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: config.location.timezone,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(date);
-  const p = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
-}
-
 async function batteryPipeline() {
   try {
     log.info('battery', 'Starting battery optimizer pipeline');
     await fetchPrices();
-    const consumption = await estimateConsumption();
 
     const now = new Date();
     const currentSlot = new Date(now);
     currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
     const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
 
-    const fromTs = localTs(currentSlot);
-    const toTs = localTs(endSlot);
+    const consumption = await estimateConsumption(currentSlot);
+
+    const fromTs = localTs(currentSlot, config.location.timezone);
+    const toTs = localTs(endSlot, config.location.timezone);
 
     // Read live SOC from inverter if available
     const options = {};
@@ -122,7 +114,7 @@ async function batteryPipeline() {
     const todayDate = fromTs.slice(0, 10);
     const rawRatio = getIntradaySolarRatio(todayDate);
     if (rawRatio !== null) {
-      const clamped = Math.max(0.1, Math.min(3.0, rawRatio));
+      const clamped = Math.max(0.1, Math.min(2.0, rawRatio));
       options.intradayScalar = clamped;
       log.info('battery', `Intra-day solar scalar: ${clamped.toFixed(2)} (actual/forecast=${(rawRatio * 100).toFixed(0)}%)`);
     }
@@ -147,7 +139,7 @@ async function snapshotPipeline() {
   const cfg = getDriverConfig();
   try {
     const totals = await driver.getEnergyTotals(cfg);
-    const snapshotTs = localTs(new Date());
+    const snapshotTs = localTs(new Date(), config.location.timezone);
     upsertEnergySnapshot(
       snapshotTs,
       totals.pv_today_kwh,
@@ -196,8 +188,8 @@ async function consumptionPipeline() {
   currentHour.setMinutes(0, 0, 0);
   const prevHour = new Date(currentHour.getTime() - 60 * 60 * 1000);
 
-  const currentHourTs = localTs(currentHour);
-  const prevHourTs    = localTs(prevHour);
+  const currentHourTs = localTs(currentHour, config.location.timezone);
+  const prevHourTs    = localTs(prevHour, config.location.timezone);
 
   try {
     const snapNow  = getSnapshotAtOrBefore(currentHourTs);
@@ -295,8 +287,8 @@ async function executePipeline() {
     currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
     const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
 
-    const fromTs = localTs(currentSlot);
-    const toTs = localTs(endSlot);
+    const fromTs = localTs(currentSlot, config.location.timezone);
+    const toTs = localTs(endSlot, config.location.timezone);
 
     const slots = getScheduleForRange(fromTs, toTs);
     if (!slots.length) {
@@ -305,7 +297,7 @@ async function executePipeline() {
     }
 
     // Filter to future slots only
-    const nowTs = localTs(now);
+    const nowTs = localTs(now, config.location.timezone);
     const futureSlots = slots.filter(s => s.slot_ts >= nowTs);
     if (!futureSlots.length) {
       log.warn('execute', 'No future slots — skipping execution');

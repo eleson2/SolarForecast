@@ -41,8 +41,8 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
-| Peak shaving             | Design only | Deferred until real-time consumption available |
-| EV-aware scheduling      | Not started | v2 — detect EV charging, plan around it  |
+| Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
+| EV-aware scheduling      | Deferred    | EV charging managed externally via Home Assistant PV-surplus automation; this software will not implement it |
 
 ---
 
@@ -80,43 +80,39 @@ spike briefly (e.g. 17:00–17:15 vs 17:15–17:30 can differ significantly).
 
 ### 3. Household consumption estimate
 
-**Primary approach: "yesterday + temperature correction"**
+**Two-layer approach: OLS daytime model + yesterday's actuals for nighttime**
 
-Use yesterday's actual hourly consumption as the baseline for today's forecast.
-Adjust for outdoor temperature difference, since heating and cooling are the main
-variable loads in most households.
+**Daytime (08:00–18:00) — `consumption-learner.js`**
 
+A single linear OLS regression is fitted across all daytime readings:
 ```
-consumption_estimate(hour) = yesterday_actual(hour) × temperature_factor
-```
-
-Where `temperature_factor` accounts for the difference between today's forecast
-temperature and yesterday's actual temperature. Heating-dominated climates use
-more energy when it's colder; cooling-dominated climates use more when it's hotter.
-
-**Temperature correction model:**
-
-```javascript
-// Heating degree difference: how much colder is today vs yesterday
-const temp_diff = forecast_temp(hour) - yesterday_temp(hour);
-
-// Each degree colder → ~3% more consumption (configurable)
-// Each degree warmer → ~3% less consumption (in heating climates)
-const temp_factor = 1.0 - (temp_diff * heating_sensitivity);
-// Clamp to reasonable range
-const factor = Math.max(0.7, Math.min(1.3, temp_factor));
+consumption_w = slope × outdoor_temp + intercept
 ```
 
-**Data sources for yesterday's consumption:**
-- Smart meter / P1 port — direct hourly readings
-- Inverter API — grid import values
-- Computed: `grid_import + solar_production - battery_charge + battery_discharge`
+Heat loss from a building is governed by the indoor/outdoor temperature differential,
+not the time of day. One regression line across all daytime hours pools far more data
+(11× more samples for the same number of days) than per-hour models would.
 
-**Fallback chain:**
-1. Yesterday's actual hourly consumption (temperature-adjusted)
-2. Same weekday last week (if yesterday was atypical)
-3. Manual profile from config (weekday/weekend patterns)
-4. Flat estimate as last resort
+Refreshed hourly by `learnPipeline`. Requires ≥ 50 samples (~5 days) before activating.
+
+Readings above `consumption.max_house_w` are excluded from the regression to prevent
+EV charging sessions from corrupting the slope. Nighttime hours (19:00–07:00) are
+excluded for the same reason — EV charging typically happens overnight.
+
+The fitted slope and intercept are stored in the `consumption_model` table and logged
+each run with R². A low R² (< 0.3) triggers a warning — this may be normal when
+large variable loads (EV, oven) add uncorrelated variance.
+
+**Nighttime (19:00–07:00) — yesterday's actual readings**
+
+Yesterday's hourly actuals from `consumption_readings` are used directly for overnight
+hours, where the temperature model is unreliable and EV charging spikes are excluded
+from the regression anyway.
+
+**Fallback**
+
+If the model has fewer than 50 samples or the DB has no yesterday data, falls back
+to `config.consumption.flat_watts` as a flat estimate.
 
 ### 4. Battery state
 From inverter API or manual config:
@@ -176,6 +172,11 @@ export default {
         heating_sensitivity: 0.03,  // 3% per degree C
         climate: 'heating',         // 'heating' or 'cooling' — which direction costs more
         flat_watts: 800,            // fallback: average household consumption
+        // Maximum expected house consumption without EV charging (watts).
+        // Daytime readings above this are excluded from the temperature regression,
+        // preventing EV sessions from corrupting the consumption model slope.
+        // Rule of thumb: peak heating load + all appliances, but not the EV charger.
+        max_house_w: 5000,
     },
     price: {
         source: 'elprisetjust',     // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)
@@ -422,26 +423,20 @@ that hour, then re-optimizes hourly as actuals deviate from forecast.
 ## Architecture
 
 ```
-battery-optimizer/
-├── src/
-│   ├── price-fetcher.js     # Thin dispatcher — routes to provider
-│   ├── prices/
-│   │   ├── elprisetjust.js  # Nordics: elprisetjustnu.se (15-min)
-│   │   └── awattar.js       # DE/AT: aWATTar API (hourly → 4×15-min)
-│   ├── inverters/           # Pluggable inverter drivers (see inverter-integration.md)
-│   │   ├── growatt.js       # Cloud REST API, time-segment based
-│   │   ├── solaredge.js     # Local Modbus TCP, per-register
-│   │   ├── huawei.js        # Local Modbus, TOU mode
-│   │   ├── sma.js           # Local Modbus, manual setpoint
-│   │   ├── enphase.js       # Local REST + JWT
-│   │   ├── tesla.js         # Cloud Fleet API, reserve-% control
-│   │   └── givenergy.js     # Cloud REST or local MQTT/GivTCP
-│   ├── consumption.js       # Yesterday's usage + temperature correction
-│   ├── optimizer.js         # Greedy v1: solar-aware charge/discharge pairing
-│   ├── battery-state.js     # Track SOC, enforce constraints
-│   └── battery-api.js       # Express endpoints for schedule
-├── battery-config.js        # Battery + grid + price + EV configuration
-└── (integrated into scheduler.js)
+(integrated into the main SolarForecast project)
+src/
+├── price-fetcher.js          # Thin dispatcher — routes to price provider
+├── prices/
+│   ├── elprisetjust.js       # Nordics: elprisetjustnu.se (15-min)
+│   └── awattar.js            # DE/AT: aWATTar API (hourly → 4×15-min)
+├── inverters/                # Pluggable inverter drivers
+│   ├── growatt.js            # Growatt cloud REST API (MIN/MIX series)
+│   └── growatt-modbus.js     # Local Modbus TCP (MOD TL3-XH) — primary driver
+├── consumption.js            # Consumption estimator: OLS model (day) + yesterday (night)
+├── consumption-learner.js    # Fits OLS regression from consumption_readings
+├── optimizer.js              # Greedy v1: solar-aware charge/discharge pairing
+├── override.js               # Persistent manual override state
+└── battery-api.js            # Express endpoints: schedule, history, override, control
 ```
 
 ---
@@ -618,8 +613,8 @@ The `applySchedule()` function translates optimizer actions to a target SOC valu
 
 | Optimizer action         | SOC target                  | Effect                           |
 |--------------------------|-----------------------------|----------------------------------|
-| `charge_grid` / `charge_solar` | `charge_soc` (default 95%) | High floor → battery charges     |
-| `discharge` / `sell`     | `discharge_soc` (default 13%) | Low floor → battery discharges |
+| `charge_grid` / `charge_solar` | `charge_soc` (default 90%) | High floor → battery charges     |
+| `discharge` / `sell`     | `discharge_soc` (default 20%) | Low floor → battery discharges |
 | `idle`                   | Current SOC                 | Holds current level              |
 
 This runs every 15 minutes (via `executePipeline` in the scheduler), so the SOC floor
@@ -724,43 +719,17 @@ Configurable via `config.battery.soc_deviation_threshold` (default: 10 %).
 
 ---
 
-## EV-Aware Scheduling (v2)
+## EV Charging
 
-Electric vehicles are large, flexible loads that can dramatically change the
-optimization landscape. A typical EV charges at 3.6–11 kW — often more than
-the rest of the household combined.
+EV charging is handled externally via a **Home Assistant automation** that starts
+the charger when there is a PV surplus. This software does not schedule or control
+EV charging.
 
-### Why it matters
+The main interaction point is the `consumption.max_house_w` threshold: readings
+above this value are excluded from the daytime consumption regression, preventing
+EV charging sessions from inflating the slope and corrupting future estimates.
 
-- EV charging at peak price can cost 5–10× more than charging at the cheapest hour
-- An EV plugged in overnight has 8+ hours of flexibility — perfect for optimization
-- Without EV awareness, the optimizer sees a huge unexpected load and its schedule breaks
-
-### v2 approach
-
-```javascript
-ev: {
-    enabled: true,
-    charge_rate_w: 7400,          // typical home charger (32A single-phase)
-    target_soc: 80,               // desired SOC by departure
-    departure_time: '07:30',      // when the car needs to be ready
-    battery_kwh: 60,              // EV battery size
-    current_soc: 40,              // from EV API or manual
-    charger_type: 'smart',        // 'smart' (can schedule) or 'dumb' (charges immediately)
-}
-```
-
-The optimizer would:
-1. Calculate kWh needed: `(target_soc - current_soc) / 100 × battery_kwh`
-2. Calculate hours needed: `kwh_needed / (charge_rate_w / 1000)`
-3. Pick the cheapest hours before `departure_time` to schedule charging
-4. Coordinate with house battery — don't charge both from grid simultaneously
-   if it would exceed the grid connection limit
-
-### Detection (future)
-If no EV config is provided, detect EV charging from consumption patterns:
-sustained high load (>3 kW) appearing in the evening is likely an EV.
-Flag it and suggest the user configure EV settings.
+No further EV integration is planned in this software.
 
 ---
 
@@ -818,13 +787,19 @@ The peak shaving layer runs **before** the greedy pairing:
 3. Reserve battery Wh for those slots
 4. Then run normal greedy pairing with remaining capacity
 
-### Why deferred
+### What is implemented
 
-Peak shaving needs actual consumption metering data to track the monthly
-peak. The current system estimates consumption from yesterday's data,
-which isn't precise enough for peak tracking. Implementation should wait
-until real-time consumption reading is available (e.g. from P1 port or
-inverter grid import readings).
+The register write is live: `POST /battery/control/peak-shaving` calls
+`driver.setPeakShavingTarget(limit_kw)` which writes to holding register 800.
+The scheduler also writes the configured `peak_shaving.default_kw` value on startup
+and can apply time-of-day schedule overrides.
+
+### What is not yet implemented
+
+The **autonomous optimizer integration** — tracking the monthly peak, reserving
+battery capacity for peak-shaving slots, and incorporating peak fee savings into
+the pairing algorithm — is not started. This requires reliable real-time grid
+import readings (available via Modbus input 3021–3022) to track intra-hour peaks.
 
 ---
 

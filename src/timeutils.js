@@ -1,4 +1,18 @@
 /**
+ * Format a Date as "YYYY-MM-DDTHH:MM" in the configured timezone.
+ * Centralised here so scheduler.js and consumption.js share one copy.
+ */
+export function localTs(date, timezone) {
+  const parts = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(date);
+  const p = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
+/**
  * Parse a DB timestamp string ("YYYY-MM-DDTHH:MM") into its components.
  * No Date object — avoids all timezone conversion issues.
  */

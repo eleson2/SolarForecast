@@ -77,6 +77,7 @@ export function runModel() {
   }
 
   const biasScalar = computeRecencyBias();
+  const suppressionMax = config.learning.cloud_suppression_max ?? 0.65;
 
   let count = 0;
   for (const row of rows) {
@@ -109,7 +110,6 @@ export function runModel() {
     // Cloud-cover suppression: heavy overcast days exceed what the correction matrix
     // expects because the matrix averages over mixed-sky conditions. Scale down
     // proportionally to cloud cover so 100% cloud applies the full suppression factor.
-    const suppressionMax = config.learning.cloud_suppression_max ?? 0.65;
     const cloudFactor = (row.cloud_cover != null)
       ? 1 - (row.cloud_cover / 100) * suppressionMax
       : 1.0;

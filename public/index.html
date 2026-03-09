@@ -556,20 +556,18 @@ const ACTION_BG = {
 // Compute what MinReservedSOC was written to the inverter for a given schedule slot.
 // Mirrors the logic in applySchedule() in growatt-modbus.js.
 function computeMinReservedSOC(row, invCfg) {
-  const intent = { charge_grid: 'charge', charge_solar: 'charge',
-                   discharge: 'discharge', sell: 'discharge' }[row.action] ?? 'idle';
+  const chargeSoc    = invCfg.charge_soc    ?? 90;
+  const dischargeSoc = invCfg.discharge_soc ?? 20;
   let target;
-  if (intent === 'charge') {
-    target = (row.soc_end != null)
-      ? Math.min(row.soc_end, invCfg.charge_soc)
-      : invCfg.charge_soc;
-  } else if (intent === 'discharge') {
-    target = invCfg.discharge_soc;
+  if (row.action === 'charge_grid') {
+    target = chargeSoc;
+  } else if (row.action === 'discharge' || row.action === 'sell') {
+    target = dischargeSoc;
   } else {
-    // idle: max(soc_start, discharge_soc) — soc_start is the planned value at slot start
-    target = Math.max(row.soc_start ?? invCfg.discharge_soc, invCfg.discharge_soc);
+    // idle / charge_solar: hold at planned SOC for this slot
+    target = Math.max(row.soc_start ?? dischargeSoc, dischargeSoc);
   }
-  return Math.max(invCfg.discharge_soc, Math.min(100, target));
+  return Math.max(dischargeSoc, Math.min(100, target));
 }
 
 // Compute the peak shaving import limit (kW) for a given slot timestamp.

@@ -1,21 +1,9 @@
 import config from '../config.js';
 import { getConsumptionForRange, getDaytimeConsumptionModel } from './db.js';
+import { localTs } from './timeutils.js';
 
 const DAYTIME_START = 8;   // first hour covered by the temperature model (inclusive)
 const DAYTIME_END   = 18;  // last hour covered by the temperature model (inclusive)
-
-/**
- * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
- */
-function localTs(date) {
-  const parts = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: config.location.timezone,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(date);
-  const p = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
-}
 
 /**
  * Fetch today's and yesterday's hourly temperatures from Open-Meteo.
@@ -42,40 +30,47 @@ async function fetchTemperatures() {
 }
 
 /**
- * Estimate hourly consumption for today (24 entries).
- * Returns array of { hour_ts, consumption_w }.
+ * Estimate hourly consumption for the next 24 hours starting from windowStart.
+ * Returns array of { hour_ts, consumption_w } with timestamps matching the
+ * optimizer window so the consumptionMap lookup doesn't fall back to flat_watts.
+ *
+ * @param {Date} [windowStart] - Start of the optimizer window (defaults to now).
+ *   Should be the same Date used to compute fromTs in batteryPipeline.
  *
  * Strategy:
  * 1. If source='yesterday' and yesterday's data exists: use it with temp correction
  * 2. Fallback: flat_watts from config
  */
-export async function estimateConsumption() {
+export async function estimateConsumption(windowStart = null) {
   const now = new Date();
 
-  // Compute yesterday and today start timestamps in local time
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  // Adjust to local timezone midnight
-  const todayStartTs = localTs(todayStart).slice(0, 11) + '00:00';
-  const todayDateStr = todayStartTs.slice(0, 10);
+  // Floor the window start to the beginning of the current hour (UTC-aligned, works
+  // for any whole-hour timezone offset such as Europe/Stockholm UTC+1/+2).
+  const baseMs = Math.floor((windowStart ?? now).getTime() / 3_600_000) * 3_600_000;
 
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const yesterdayStartTs = localTs(yesterday).slice(0, 11) + '00:00';
-  const yesterdayDateStr = yesterdayStartTs.slice(0, 10);
+  // Generate the 24 hour_ts strings for the window in the configured timezone.
+  // Each entry also carries the hour-of-day for looking up historical data.
+  const windowHours = [];
+  for (let i = 0; i < 24; i++) {
+    const d = new Date(baseMs + i * 3_600_000);
+    const ts = localTs(d, config.location.timezone).slice(0, 13) + ':00';   // "YYYY-MM-DDTHH:00"
+    const hourOfDay = parseInt(ts.slice(11, 13), 10);
+    windowHours.push({ ts, hourOfDay });
+  }
 
-  const tomorrowStart = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const tomorrowStartTs = localTs(tomorrowStart).slice(0, 11) + '00:00';
+  // Yesterday's date (for historical consumption lookup)
+  const yesterday = new Date(baseMs - 24 * 3_600_000);
+  const yesterdayDateStr = localTs(yesterday, config.location.timezone).slice(0, 10);
+  const todayDateStr = windowHours[0].ts.slice(0, 10); // date the window starts on
 
   const estimates = [];
 
   if (config.consumption.source === 'yesterday') {
-    // Try to get yesterday's consumption from DB
     const yesterdayData = getConsumptionForRange(
       `${yesterdayDateStr}T00:00`,
       `${todayDateStr}T00:00`
     );
 
-    // Always fetch temperatures — needed by both model and yesterday-based paths
     let temps;
     try {
       temps = await fetchTemperatures();
@@ -84,7 +79,7 @@ export async function estimateConsumption() {
       temps = null;
     }
 
-    // Build lookup: hour (0-23) → yesterday's {w, temp}
+    // Build lookup: hour-of-day (0-23) → yesterday's { w, temp }
     const yesterdayByHour = new Map();
     for (const row of yesterdayData) {
       const hour = parseInt(row.hour_ts.slice(11, 13), 10);
@@ -92,21 +87,16 @@ export async function estimateConsumption() {
     }
 
     if (yesterdayData.length > 0) {
-      // Single daytime model: one slope+intercept fit across all hours 08–18.
-      // Nighttime falls through to yesterday's data (EV charging excluded from model).
       const daytimeModel = getDaytimeConsumptionModel();
       let modelHours = 0;
       let yesterdayHours = 0;
 
-      for (let h = 0; h < 24; h++) {
-        const hStr = String(h).padStart(2, '0');
-        const hourTs = `${todayDateStr}T${hStr}:00`;
+      for (const { ts: hourTs, hourOfDay: h } of windowHours) {
         const forecastTemp = temps?.get(hourTs) ?? null;
 
-        // --- Path 1: learned regression model (daytime only) ---
+        // --- Path 1: learned regression model (daytime hours only) ---
         if (h >= DAYTIME_START && h <= DAYTIME_END && daytimeModel && forecastTemp !== null) {
           const predicted = Math.round(daytimeModel.slope * forecastTemp + daytimeModel.intercept);
-          // Clamp to a plausible range (never below 100 W, never above 3× flat_watts)
           const clamped = Math.max(100, Math.min(config.consumption.flat_watts * 3, predicted));
           estimates.push({ hour_ts: hourTs, consumption_w: clamped });
           modelHours++;
@@ -122,6 +112,7 @@ export async function estimateConsumption() {
 
         let factor = 1.0;
         if (temps && forecastTemp !== null) {
+          const hStr = String(h).padStart(2, '0');
           const yesterdayHourTs = `${yesterdayDateStr}T${hStr}:00`;
           const yesterdayTemp = yesterdayEntry.temp ?? temps.get(yesterdayHourTs);
           if (yesterdayTemp != null) {
@@ -151,15 +142,10 @@ export async function estimateConsumption() {
     console.log('[consumption] No yesterday data, falling back to flat estimate');
   }
 
-  // Fallback: flat watts
-  for (let h = 0; h < 24; h++) {
-    const hStr = String(h).padStart(2, '0');
-    estimates.push({
-      hour_ts: `${todayDateStr}T${hStr}:00`,
-      consumption_w: config.consumption.flat_watts,
-    });
+  // Fallback: flat watts for each window hour
+  for (const { ts: hourTs } of windowHours) {
+    estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
   }
-
   console.log(`[consumption] Using flat estimate: ${config.consumption.flat_watts}W`);
   return estimates;
 }
