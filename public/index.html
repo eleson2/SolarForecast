@@ -355,15 +355,27 @@ async function loadSolar() {
 // --- Battery schedule ---
 async function loadSchedule() {
   const data = await fetch('/battery/schedule').then(r => r.json());
-  const { schedule, summary, inverter_config } = data;
+  const { schedule, summary, inverter_config, lp_shadow } = data;
 
   // Summary KPIs
   const s = summary;
   const savings = s.estimated_savings;
+  let lpKpi = '';
+  if (lp_shadow?.summary) {
+    const lpSav = lp_shadow.summary.estimated_savings;
+    const diff  = lpSav - savings;
+    const diffStr = (diff >= 0 ? '+' : '') + diff.toFixed(2);
+    const diffCls = diff > 0.05 ? 'green' : diff < -0.05 ? 'red' : '';
+    lpKpi = `<div class="kpi" title="LP shadow (dry run) — not applied to inverter">
+      <div class="val ${lpSav >= 0 ? 'green' : 'red'}">${lpSav >= 0 ? '+' : ''}${lpSav.toFixed(2)} SEK</div>
+      <div class="lbl">LP savings (shadow) <span class="${diffCls}" style="font-size:0.85em">${diffStr}</span></div>
+    </div>`;
+  }
   document.getElementById('batterySummary').innerHTML = `
     <div class="kpi"><div class="val">${s.estimated_cost_with_battery.toFixed(2)} SEK</div><div class="lbl">Cost with battery</div></div>
     <div class="kpi"><div class="val">${s.estimated_cost_without_battery.toFixed(2)} SEK</div><div class="lbl">Cost without battery</div></div>
     <div class="kpi"><div class="val ${savings >= 0 ? 'green' : 'red'}">${savings >= 0 ? '+' : ''}${savings.toFixed(2)} SEK</div><div class="lbl">Estimated savings (24 h)</div></div>
+    ${lpKpi}
   `;
 
   const nowTs = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Stockholm' }).replace(' ', 'T').slice(0, 16);
@@ -407,6 +419,10 @@ async function loadSchedule() {
   const sSocData  = schedule.map(r => r.soc_start ?? null);
   const sMinSoc   = schedule.map(r => computeMinReservedSOC(r, invCfg));
   const sPriceData = schedule.map(r => r.price_kwh ?? null);
+
+  // LP shadow SOC curve — align by slot_ts
+  const lpSocMap = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, r.soc_start]));
+  const lpSocData = schedule.map(r => lpSocMap.get(r.slot) ?? null);
   const sBarBg    = schedule.map(r => {
     const base = ACTION_BG[r.action] ?? ACTION_BG.idle;
     // Dim past slots
@@ -457,6 +473,19 @@ async function loadSchedule() {
         },
         {
           type: 'line',
+          label: 'LP SOC % (shadow)',
+          data: lpSocData,
+          borderColor: '#a78bfa',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [3, 3],
+          yAxisID: 'ySoc',
+          order: 2,
+          hidden: lpSocData.every(v => v === null),
+        },
+        {
+          type: 'line',
           label: 'Price SEK/kWh',
           data: sPriceData,
           borderColor: '#f5c842',
@@ -481,7 +510,7 @@ async function loadSchedule() {
           callbacks: {
             label: ctx => {
               if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
-              if (ctx.datasetIndex === 3) return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
+              if (ctx.dataset.yAxisID === 'yPrice') return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
               return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             },
             afterBody: (items) => {

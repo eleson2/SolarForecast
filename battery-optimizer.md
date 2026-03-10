@@ -38,11 +38,69 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Charge/discharge window logging | Done | `logWindows()` in `optimizer.js` groups consecutive slots into time windows with kWh and avg price |
 | Cloud-cover suppression  | Done        | `model.js` applies `cloudFactor = 1 - (cloud_cover/100) * cloud_suppression_max` to every forecast hour; `cloud_suppression_max` (default 0.65) is in `config.learning`; at 100% cloud the forecast is scaled to ~35% of the irradiance-only value |
 | Intra-day solar scalar   | Done        | `batteryPipeline` calls `getIntradaySolarRatio(today)` — ratio of actual-to-forecast for completed daylight hours — and passes it to the optimizer as `options.intradayScalar`; optimizer multiplies remaining-day solar forecast values by this scalar before planning |
+| Temporal feasibility correction | Done | After Phase B, a correction loop simulates forward SOC and detects discharge slots that would be cancelled (executed < 50% of planned). It removes the cheapest earlier discharge to free SOC for the higher-value later slot, repeating up to 20 times. Prevents low-margin early discharges (e.g. 0.70 €/kWh at 16:00) from depleting the battery before the price peak (e.g. 1.11 €/kWh at 19:00). |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
 | EV-aware scheduling      | Deferred    | EV charging managed externally via Home Assistant PV-surplus automation; this software will not implement it |
+| **LP optimizer (shadow)** | **Done**   | `src/optimizer-lp.js` — HiGHS-based LP, same interface as greedy. Runs in `dry_run` mode alongside greedy for comparison. See LP section below. |
+
+---
+
+## LP Optimizer
+
+### Motivation
+
+The greedy algorithm has structural limitations: Phase A pairs charge/discharge slots by price without enforcing temporal ordering (cheap overnight charge can be paired with same-evening discharge, which is physically impossible). Phase B allocates a global energy budget that doesn't account for SOC depletion order. These cause suboptimal plans, which the correction loop only partially fixes.
+
+LP solves all constraints simultaneously and guarantees a globally optimal schedule within the model. First comparison (2026-03-10, SOC 61%): **LP saved 10.5 SEK vs greedy's 5.6 SEK — 87% more savings** — primarily by correctly avoiding unnecessary overnight grid charging that the greedy incorrectly schedules.
+
+### Formulation
+
+**Variables per slot** `t = 0…N-1` (N = 96 for 24 h):
+
+| Variable | Meaning | Bounds |
+|----------|---------|--------|
+| `cg_t` | Grid charge power (W) | `[0, max_charge_w]` |
+| `d_t`  | Discharge power (W)   | `[0, min(max_discharge_w, consumption_t − solar_t)]` |
+| `cs_t` | Solar charge power (W)| `[0, min(max_charge_w, solar_t − consumption_t)]` |
+| `s_t`  | Battery SOC (Wh)      | `[min_soc_wh, max_soc_wh]`, `s_0` fixed to `startSocWh` |
+
+**Objective** — minimize incremental grid cost:
+
+```
+minimize  Σ buy_price[t] × cg_t × 0.25/1000
+        − Σ buy_price[t] × d_t  × 0.25/1000
+```
+
+**SOC continuity** (enforced per slot — no temporal ordering bugs possible):
+
+```
+s_{t+1} = s_t + η × 0.25 × (cg_t + cs_t) − 0.25 × d_t    ∀t
+```
+
+Mutual exclusion (no simultaneous charge+discharge) is not needed explicitly — round-trip efficiency < 1 makes it always net-negative, so the solver never chooses it.
+
+### Solver
+
+[HiGHS](https://highs.dev) via `highs` npm package (WASM build). MIT licensed, production-grade. For 96 slots (≈385 variables, ≈200 constraints) it solves in <100 ms. Instance is cached at module level (`optimizer-lp.js`) so WASM loads once per process.
+
+### Comparison workflow
+
+```bash
+# Compare both optimizers on live data (greedy writes to DB, LP is shadow/dry-run):
+node run-compare-optimizers.js
+
+# With manual SOC override (useful when inverter is offline):
+node run-compare-optimizers.js --soc 61
+```
+
+Output: colour-coded slot-by-slot diff table + savings summary with LP vs greedy advantage.
+
+### Migration plan
+
+LP is shadow-only until behaviour converges with greedy across diverse price curves and seasons. When satisfied, swap `src/optimizer.js` import in `scheduler.js` for `src/optimizer-lp.js` (same interface, but `async` — scheduler call needs `await`).
 
 ---
 

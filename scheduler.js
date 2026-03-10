@@ -10,9 +10,11 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer } from './src/optimizer.js';
+import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
 import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride } from './src/override.js';
+import { setLpShadow } from './src/battery-api.js';
 import config from './config.js';
 import app from './src/api.js';
 import log from './src/logger.js';
@@ -120,6 +122,21 @@ async function batteryPipeline() {
     }
 
     runOptimizer(fromTs, toTs, consumption, options);
+
+    // Run LP optimizer in shadow mode (dry_run — no DB write) for comparison.
+    // Logs savings side-by-side; replace greedy with LP once confident.
+    try {
+      const { summary: lpSummary, schedule: lpSchedule } = await runOptimizerLP(fromTs, toTs, consumption,
+        { ...options, dry_run: true });
+      if (lpSummary) {
+        setLpShadow(lpSummary, lpSchedule);
+        log.info('battery', `LP shadow: savings ${lpSummary.estimated_savings} ${config.price.currency}` +
+          ` (greedy DB schedule is live)`);
+      }
+    } catch (lpErr) {
+      log.warn('battery', `LP shadow run failed: ${lpErr.message}`);
+    }
+
     log.info('battery', 'Battery optimizer pipeline complete');
     recordPipelineRun('battery');
   } catch (err) {

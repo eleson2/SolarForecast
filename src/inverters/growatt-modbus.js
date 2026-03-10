@@ -93,12 +93,17 @@ async function getConnection(cfg) {
   if (client?.isOpen) return client;
   destroyClient();
   client = new ModbusRTU();
+  const connPromise = client.connectTCP(cfg.host, { port: cfg.port || 502 });
   try {
     await Promise.race([
-      client.connectTCP(cfg.host, { port: cfg.port || 502 }),
+      connPromise,
       timeout(CONNECT_TIMEOUT_MS, `TCP connect to ${cfg.host}`),
     ]);
   } catch (err) {
+    // Suppress any future rejection from connPromise — if the timeout won the
+    // race, the TCP connection is still in flight and will eventually reject
+    // with ETIMEDOUT. Without this, Node raises an unhandled rejection.
+    connPromise.catch(() => {});
     destroyClient();
     throw err;
   }

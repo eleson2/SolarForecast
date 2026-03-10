@@ -11,6 +11,7 @@
     "better-sqlite3": "^11.0.0",
     "express": "^4.21.0",
     "express-basic-auth": "^1.2.1",
+    "highs": "^1.8.0",
     "modbus-serial": "^8.0.23",
     "node-cron": "^3.0.3"
   }

@@ -6,6 +6,14 @@ import { setOverride, clearOverride, getOverride } from './override.js';
 
 const router = Router();
 
+// In-memory LP shadow result — updated by scheduler after each battery pipeline run.
+let lpShadow = null; // { summary, schedule, computed_at }
+
+/** Called by scheduler.js after each LP dry-run. */
+export function setLpShadow(summary, schedule) {
+  lpShadow = { summary, schedule, computed_at: new Date().toISOString() };
+}
+
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
  */
@@ -91,6 +99,11 @@ router.get('/schedule', (req, res) => {
       estimated_cost_with_battery: Math.round(costWith * 100) / 100,
       estimated_savings: Math.round((costWithout - costWith) * 100) / 100,
     },
+    lp_shadow: lpShadow ? {
+      computed_at: lpShadow.computed_at,
+      summary:     lpShadow.summary,
+      soc:         lpShadow.schedule.map(r => ({ slot: r.slot_ts, soc_start: r.soc_start, action: r.action })),
+    } : null,
   });
 });
 

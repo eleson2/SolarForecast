@@ -108,12 +108,16 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     console.log(`[optimizer] Intra-day solar scalar: ${intradayScalar.toFixed(2)} applied to remaining forecast`);
   }
 
+  // Minimum solar power to be treated as real generation — suppresses pre-dawn
+  // forecast artefacts that would otherwise cause spurious SOC increases.
+  const MIN_SOLAR_W = 50;
+
   const solarHourly = solarRows.map(r => ({
     hour_ts: r.hour_ts,
     value: r.prod_forecast != null ? r.prod_forecast * 1000 * intradayScalar : 0, // kW → W
   }));
   const solar15min = interpolateTo15Min(solarHourly);
-  const solarMap = new Map(solar15min.map(s => [s.slot_ts, s.value]));
+  const solarMap = new Map(solar15min.map(s => [s.slot_ts, Math.max(0, s.value) < MIN_SOLAR_W ? 0 : s.value]));
 
   // Consumption (hourly) → interpolate to 15-min
   const consumption15min = interpolateTo15Min(
@@ -148,8 +152,9 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
 
   // 3. Greedy scheduling
   const capacityWh = bat.capacity_kwh * 1000;
-  const minSocWh = (bat.min_soc / 100) * capacityWh;
-  const maxSocWh = (bat.max_soc / 100) * capacityWh;
+  const minSocPct  = config.inverter?.discharge_soc ?? bat.min_soc;
+  const minSocWh   = (minSocPct / 100) * capacityWh;
+  const maxSocWh   = (bat.max_soc / 100) * capacityWh;
   const slotHours = 0.25; // 15 min = 0.25 hours
   const maxChargeWh = bat.max_charge_w * slotHours;
   const maxDischargeWh = bat.max_discharge_w * slotHours;
@@ -224,14 +229,19 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
 
   // Phase A: pair cheapest grid-charge with most expensive discharge.
   // Grid charging is capped to gridHeadroomWh — solar fills the rest.
+  // Temporal constraint: charge must precede discharge in time. If the cheapest
+  // charge slot comes after the most expensive discharge, skip that discharge.
   while (ci < chargeOrder.length && di < dischargeOrder.length && gridChargedWh < gridHeadroomWh) {
     const cIdx = chargeOrder[ci];
     const dIdx = dischargeOrder[di];
 
     if (cIdx === dIdx) { ci++; continue; }
 
+    // Charge must come before discharge — skip discharge if no valid charge exists yet
+    if (slots[cIdx].slot_ts >= slots[dIdx].slot_ts) { di++; continue; }
+
     const spread = slots[dIdx].buy_price - slots[cIdx].buy_price;
-    if (spread <= minSpread) break;
+    if (spread <= minSpread) { di++; continue; }
 
     const dischargeWh = Math.min(slots[dIdx].avoidable_wh, maxDischargeWh,
                                  (gridHeadroomWh - gridChargedWh) * bat.efficiency);
@@ -273,6 +283,136 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
     }
   }
 
+  // Phase C: overnight recharge opportunity.
+  // Phase B uses the existing SOC for tonight's discharge. After that the battery
+  // is at minSocWh — a fresh full-range headroom is available for a second cycle.
+  // Detect when the battery first depletes, then pair cheap overnight charge slots
+  // with expensive next-morning discharge slots.
+  {
+    // Mini forward-pass to find the first slot where SOC reaches minSocWh.
+    let socSim = startSocWh;
+    let depletedAtIdx = -1;
+    const dSimMap = new Map(dischargeSlots.map(d => [d.idx, d.wh]));
+    const cSimMap  = new Map(chargeSlots.map(c => [c.idx, c.wh]));
+    for (let i = 0; i < slots.length; i++) {
+      if (cSimMap.has(i)) {
+        socSim = Math.min(maxSocWh, socSim + cSimMap.get(i) * bat.efficiency);
+      } else if (dSimMap.has(i)) {
+        const ex = Math.min(dSimMap.get(i), socSim - minSocWh);
+        socSim = Math.max(minSocWh, socSim - ex);
+      } else if (slots[i].net_production > 0) {
+        socSim = Math.min(maxSocWh, socSim + slots[i].net_production * slotHours);
+      }
+      if (depletedAtIdx === -1 && socSim <= minSocWh + 100) depletedAtIdx = i;
+    }
+
+    if (depletedAtIdx >= 0 && depletedAtIdx < slots.length - 1) {
+      const alreadyDs = new Set(dischargeSlots.map(d => d.idx));
+      const alreadyCs = new Set(chargeSlots.map(c => c.idx));
+
+      // Charge candidates after depletion, sorted cheapest first
+      const postChargeOrder = slots
+        .map((_, i) => i)
+        .filter(i => i > depletedAtIdx && slots[i].net_production <= 0 && !alreadyCs.has(i))
+        .sort((a, b) => slots[a].buy_price - slots[b].buy_price);
+
+      // Discharge candidates after depletion, sorted most expensive first
+      const postDischargeOrder = slots
+        .map((_, i) => i)
+        .filter(i => i > depletedAtIdx && slots[i].avoidable_wh > 0 && !alreadyDs.has(i))
+        .sort((a, b) => slots[b].buy_price - slots[a].buy_price);
+
+      const phaseCBudgetWh = maxSocWh - minSocWh;
+      let phaseCChargedWh = 0;
+      let pci = 0, pdi = 0;
+
+      while (pci < postChargeOrder.length && pdi < postDischargeOrder.length
+             && phaseCChargedWh < phaseCBudgetWh) {
+        const cIdx = postChargeOrder[pci];
+        const dIdx = postDischargeOrder[pdi];
+
+        // Temporal constraint: charge must precede discharge
+        if (slots[cIdx].slot_ts >= slots[dIdx].slot_ts) { pci++; continue; }
+
+        const spread = slots[dIdx].buy_price - slots[cIdx].buy_price;
+        if (spread <= minSpread) { pdi++; continue; }
+
+        const dischargeWh = Math.min(slots[dIdx].avoidable_wh, maxDischargeWh,
+                                     (phaseCBudgetWh - phaseCChargedWh) * bat.efficiency);
+        const chargeWh    = Math.min(dischargeWh / bat.efficiency, maxChargeWh,
+                                     phaseCBudgetWh - phaseCChargedWh);
+        if (chargeWh <= 0) { pdi++; continue; }
+
+        chargeSlots.push({ idx: cIdx, wh: chargeWh });
+        dischargeSlots.push({ idx: dIdx, wh: dischargeWh });
+        phaseCChargedWh += chargeWh;
+        pci++;
+        pdi++;
+      }
+
+      if (phaseCChargedWh > 0) {
+        console.log(`[optimizer] Phase C (overnight): ${(phaseCChargedWh / 1000).toFixed(1)} kWh grid charge planned after battery depletion`);
+      }
+    }
+  }
+
+  // Temporal feasibility correction: Phase B budgets energy globally but the forward SOC pass
+  // runs chronologically. Low-value early discharges can deplete the battery before high-value
+  // later slots execute. Swap them out: find the most valuable discharge slot that would be
+  // cancelled (executed < 50% of planned), remove the cheapest earlier discharge, repeat.
+  {
+    const chargeMap = new Map(chargeSlots.map(cs => [cs.idx, cs.wh]));
+    const maxIter = 20;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+      // Simulate forward SOC with current plan
+      const dischargeMap = new Map(dischargeSlots.map(ds => [ds.idx, ds.wh]));
+      let soc = startSocWh;
+      const executedWh = new Map();
+
+      for (let i = 0; i < slots.length; i++) {
+        if (chargeMap.has(i)) {
+          soc = Math.min(maxSocWh, soc + chargeMap.get(i) * bat.efficiency);
+        } else if (dischargeMap.has(i)) {
+          const planned  = dischargeMap.get(i);
+          const executed = Math.min(planned, soc - minSocWh);
+          executedWh.set(i, executed);
+          soc = Math.max(minSocWh, soc - executed);
+        } else if (slots[i].net_production > 0) {
+          soc = Math.min(maxSocWh, soc + slots[i].net_production * slotHours);
+        }
+      }
+
+      // Find the most valuable slot that executes at less than 50% of planned
+      let bestCompromised = null;
+      for (const ds of dischargeSlots) {
+        const executed = executedWh.get(ds.idx) ?? 0;
+        if (executed >= ds.wh * 0.5) continue;
+        const hasCheaperBefore = dischargeSlots.some(other =>
+          slots[other.idx].slot_ts < slots[ds.idx].slot_ts &&
+          slots[other.idx].buy_price < slots[ds.idx].buy_price
+        );
+        if (hasCheaperBefore &&
+            (!bestCompromised || slots[ds.idx].buy_price > slots[bestCompromised.idx].buy_price)) {
+          bestCompromised = ds;
+        }
+      }
+
+      if (!bestCompromised) break;
+
+      // Remove the cheapest discharge slot that runs before the compromised one
+      const before   = dischargeSlots.filter(ds => slots[ds.idx].slot_ts < slots[bestCompromised.idx].slot_ts);
+      const toRemove = before.reduce((min, ds) =>
+        slots[ds.idx].buy_price < slots[min.idx].buy_price ? ds : min
+      );
+      dischargeSlots.splice(dischargeSlots.indexOf(toRemove), 1);
+      console.log(`[optimizer] Correction: removed discharge ${slots[toRemove.idx].slot_ts.slice(11,16)} ` +
+        `(${slots[toRemove.idx].buy_price.toFixed(4)}) to preserve SOC for ` +
+        `${slots[bestCompromised.idx].slot_ts.slice(11,16)} ` +
+        `(${slots[bestCompromised.idx].buy_price.toFixed(4)})`);
+    }
+  }
+
   // Apply charge_grid actions
   for (const cs of chargeSlots) {
     slots[cs.idx].action = 'charge_grid';
@@ -300,7 +440,7 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   if (options.startSoc != null) {
     console.log(`[optimizer] Starting SOC: ${options.startSoc}% (${Math.round(currentSocWh)}Wh from inverter)`);
   } else {
-    console.log(`[optimizer] Starting SOC: ${bat.min_soc}% (conservative default)`);
+    console.log(`[optimizer] Starting SOC: ${minSocPct}% (conservative default)`);
   }
 
   for (const slot of slots) {
