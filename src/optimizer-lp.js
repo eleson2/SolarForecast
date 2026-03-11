@@ -173,6 +173,24 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     console.log(`[optimizer-lp] Starting SOC: ${minSocPct}% (conservative default)`);
   }
 
+  // Peak shaving: per-slot grid import cap → limits how fast the battery can charge from grid.
+  // cg_t upper bound = max(0, peakShavingW[t] - consumption_watts[t])
+  // Note: default_kw is the *physical* hardware limit (written to inverter register 800).
+  // It applies regardless of whether 'enabled' is true — 'enabled' only controls whether
+  // the scheduler re-dispatches the register every 15 min.
+  const psConfig = config.peak_shaving;
+  function peakShavingLimitW(slotTs) {
+    if (!psConfig?.default_kw) return bat.max_charge_w;
+    const hhmm = slotTs.slice(11, 16);
+    for (const entry of (psConfig.schedule || [])) {
+      if (hhmm >= entry.from && hhmm <= entry.to) return entry.limit_kw * 1000;
+    }
+    return psConfig.default_kw * 1000;
+  }
+  if (psConfig?.default_kw) {
+    console.log(`[optimizer-lp] Grid import cap: ${psConfig.default_kw} kW → max charge rate = cap − consumption`);
+  }
+
   // ── 4. Build LP problem string ───────────────────────────────────────────────
   //
   // Variable index convention (all watts):
@@ -181,16 +199,33 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   //   cs_T   charge_solar[T]  T = 0..N-1
   //   s_T    soc[T]           T = 0..N  (N+1 values; s_0 fixed = startSocWh)
 
-  // Objective: minimize Σ coeff_t * cg_t − Σ coeff_t * d_t
+  // Tiebreaker: tiny epsilon added linearly to cg_t coefficients.
+  // Breaks LP degeneracy on flat overnight price segments (e.g. all slots 01:00–04:00 same price).
+  // ε is ~10–40× smaller than any real price difference the optimizer acts on.
+  const avgBuyPrice = slots.reduce((s, sl) => s + sl.buy_price, 0) / slots.length;
+  const epsilonPerKwh = avgBuyPrice * 0.005;
+  console.log(`[optimizer-lp] Charge tiebreaker ε=${epsilonPerKwh.toFixed(4)} ${currency}/kWh ` +
+    `(0.5% of avg buy price ${avgBuyPrice.toFixed(3)})`);
+
+  // Objective: minimize Σ coeff_t * cg_t − Σ coeff_t * d_t − endSocBonus * s_N
+  // The end-SOC bonus is a soft incentive to end the 24h window with higher SOC,
+  // preventing the solver from draining the battery in the last expensive slot
+  // with no cost for the next optimization window starting depleted.
+  const endSocBonusCoeff = (avgBuyPrice * 0.1 * h / 1000).toFixed(8); // ~10% of avg slot value per Wh
+
   const objLines = [];
   for (let t = 0; t < N; t++) {
-    const coeff = (slots[t].buy_price * h / 1000).toFixed(8);
+    const tiebreak = epsilonPerKwh * (t / N) * h / 1000;
+    const coeff    = (slots[t].buy_price * h / 1000 + tiebreak).toFixed(8);
     objLines.push(`${coeff} cg_${t}`);
   }
   for (let t = 0; t < N; t++) {
     const coeff = (slots[t].buy_price * h / 1000).toFixed(8);
     objLines.push(`-${coeff} d_${t}`);
   }
+  // Soft penalty for low terminal SOC (subtract bonus for s_N — minimize means solver prefers high s_N)
+  objLines.push(`-${endSocBonusCoeff} s_${N}`);
+
   // Wrap long objective over multiple lines (LP format allows leading whitespace)
   const objStr = objLines.join('\n    + ').replace(/\+ -/g, '- ');
 
@@ -220,7 +255,9 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
                             Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
     const maxSol = Math.min(bat.max_charge_w,
                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
-    boundLines.push(`  0 <= cg_${t} <= ${bat.max_charge_w}`);
+    const psLimitW = peakShavingLimitW(slots[t].slot_ts);
+    const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts));
+    boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);
     boundLines.push(`  0 <= d_${t}  <= ${maxDis.toFixed(4)}`);
     boundLines.push(`  0 <= cs_${t} <= ${maxSol.toFixed(4)}`);
   }
@@ -255,7 +292,7 @@ End`;
 
   // ── 6. Parse solution → slot actions ─────────────────────────────────────────
 
-  const NOISE_W = 50; // watts — ignore numerical noise / marginal round-trips below this threshold
+  const NOISE_W = 10; // watts — ignore numerical noise / marginal round-trips below this threshold
 
   for (let t = 0; t < N; t++) {
     const cgW  = Math.max(0, result.Columns[`cg_${t}`]?.Primal ?? 0);

@@ -96,8 +96,10 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
 
   // Log average daytime cloud cover from forecast (hours where irradiance > 0)
   const daytimeRows = solarRows.filter(r => r.irr_forecast > 0 && r.cloud_cover != null);
+  const avgCloud = daytimeRows.length > 0
+    ? Math.round(daytimeRows.reduce((s, r) => s + r.cloud_cover, 0) / daytimeRows.length)
+    : 0;
   if (daytimeRows.length > 0) {
-    const avgCloud = Math.round(daytimeRows.reduce((s, r) => s + r.cloud_cover, 0) / daytimeRows.length);
     console.log(`[optimizer] Cloud cover: avg ${avgCloud}% over ${daytimeRows.length} daytime forecast hours`);
   }
 
@@ -207,16 +209,29 @@ export function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   const totalSolarWh       = slots.reduce((sum, s) => sum + s.solar_watts * slotHours, 0);
   const totalConsumptionWh = slots.reduce((sum, s) => sum + s.consumption_watts * slotHours, 0);
   const solarSufficient    = totalSolarWh >= batteryRoomWh + totalConsumptionWh;
-  const minGridReserveWh   = solarSufficient ? 0 : (bat.min_grid_charge_kwh ?? 4.0) * 1000;
+
+  // Cloud-adjusted solar confidence: on overcast days solar delivers near zero,
+  // so crediting 70% of forecast against battery headroom wastes capacity.
+  // effectiveConfidence scales to zero at 100% cloud cover.
+  const effectiveConfidence = solarConfidence * (1 - avgCloud / 100);
+
+  // Cloud-adjusted minimum grid reserve: on very overcast days (>80% cloud),
+  // solar won't fill the gap so there's no point saving room for it.
+  const baseMinReserveKwh  = bat.min_grid_charge_kwh ?? 4.0;
+  const cloudReductionFactor = Math.max(0, (avgCloud - 80) / 20); // 0 at ≤80%, 1 at 100%
+  const effectiveMinReserveKwh = baseMinReserveKwh * (1 - cloudReductionFactor);
+  const minGridReserveWh   = solarSufficient ? 0 : effectiveMinReserveKwh * 1000;
 
   const solarAbsorbCap     = Math.max(0, batteryRoomWh - minGridReserveWh);
-  const solarAbsorbWh      = Math.min(solarSurplusWh * solarConfidence, solarAbsorbCap);
+  const solarAbsorbWh      = Math.min(solarSurplusWh * effectiveConfidence, solarAbsorbCap);
   const gridHeadroomWh = Math.max(0, batteryRoomWh - solarAbsorbWh);
   const existAboveMinWh = startSocWh - minSocWh;
 
-  if (solarAbsorbWh > 0) {
-    console.log(`[optimizer] Solar-aware: ${(solarSurplusWh / 1000).toFixed(1)} kWh forecast × ${solarConfidence} confidence ` +
-                `= ${(solarAbsorbWh / 1000).toFixed(1)} kWh credited (cap ${(solarAbsorbCap / 1000).toFixed(1)} kWh), ` +
+  if (solarAbsorbWh > 0 || avgCloud > 0) {
+    console.log(`[optimizer] Solar-aware: ${(solarSurplusWh / 1000).toFixed(1)} kWh forecast × ${effectiveConfidence.toFixed(2)} confidence ` +
+                `(${solarConfidence} × ${(1 - avgCloud / 100).toFixed(2)} cloud adj) ` +
+                `= ${(solarAbsorbWh / 1000).toFixed(1)} kWh credited, ` +
+                `min reserve ${effectiveMinReserveKwh.toFixed(1)} kWh, ` +
                 `grid headroom ${(gridHeadroomWh / 1000).toFixed(1)} kWh` +
                 (solarSufficient ? ' (min_grid_charge floor waived — solar covers all)' : ''));
   }

@@ -121,20 +121,14 @@ async function batteryPipeline() {
       log.info('battery', `Intra-day solar scalar: ${clamped.toFixed(2)} (actual/forecast=${(rawRatio * 100).toFixed(0)}%)`);
     }
 
-    runOptimizer(fromTs, toTs, consumption, options);
-
-    // Run LP optimizer in shadow mode (dry_run — no DB write) for comparison.
-    // Logs savings side-by-side; replace greedy with LP once confident.
-    try {
-      const { summary: lpSummary, schedule: lpSchedule } = await runOptimizerLP(fromTs, toTs, consumption,
-        { ...options, dry_run: true });
-      if (lpSummary) {
-        setLpShadow(lpSummary, lpSchedule);
-        log.info('battery', `LP shadow: savings ${lpSummary.estimated_savings} ${config.price.currency}` +
-          ` (greedy DB schedule is live)`);
-      }
-    } catch (lpErr) {
-      log.warn('battery', `LP shadow run failed: ${lpErr.message}`);
+    // LP optimizer is primary. Greedy runs as fallback if LP returns no schedule.
+    let { summary, schedule } = await runOptimizerLP(fromTs, toTs, consumption, options);
+    if (!schedule.length) {
+      log.warn('battery', 'LP returned no schedule — falling back to greedy');
+      ({ summary, schedule } = runOptimizer(fromTs, toTs, consumption, options));
+    } else {
+      setLpShadow(summary, schedule); // keep API shadow field up to date
+      log.info('battery', `LP optimizer: savings ${summary?.estimated_savings} ${config.price.currency}`);
     }
 
     log.info('battery', 'Battery optimizer pipeline complete');

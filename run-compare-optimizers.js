@@ -13,7 +13,6 @@ import { fetchPrices }        from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer as runGreedy } from './src/optimizer.js';
 import { runOptimizer as runLP     } from './src/optimizer-lp.js';
-import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 
 // ── Timestamp helper ──────────────────────────────────────────────────────────
 
@@ -67,16 +66,7 @@ async function main() {
     options.startSoc = socArg;
     console.log(`Using --soc override: ${socArg}%\n`);
   } else {
-    const driver = getDriver();
-    if (driver) {
-      try {
-        const state = await driver.getState(getDriverConfig());
-        options.startSoc = state.soc;
-        console.log(`Live inverter SOC: ${state.soc}%\n`);
-      } catch (err) {
-        console.log(`Could not read inverter SOC: ${err.message} — using default\n`);
-      }
-    }
+    console.log(`No --soc provided — optimizers will use conservative default (${config.battery.min_soc}%)\n`);
   }
 
   const now = new Date();
@@ -179,6 +169,10 @@ async function main() {
 
   console.log(`\n  Grid charged:  Greedy ${gChargeKwh.toFixed(1)} kWh   LP ${lChargeKwh.toFixed(1)} kWh`);
   console.log(`  Discharged:    Greedy ${gDisKwh.toFixed(1)} kWh   LP ${lDisKwh.toFixed(1)} kWh`);
+
+  const firstGCharge = sg.find(s => s.action === 'charge_grid');
+  const firstLCharge = sl.find(s => s.action === 'charge_grid');
+  console.log(`  First charge slot: Greedy ${firstGCharge?.slot_ts.slice(11, 16) ?? '—'}   LP ${firstLCharge?.slot_ts.slice(11, 16) ?? '—'}`);
   console.log();
 }
 

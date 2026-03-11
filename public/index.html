@@ -420,9 +420,19 @@ async function loadSchedule() {
   const sMinSoc   = schedule.map(r => computeMinReservedSOC(r, invCfg));
   const sPriceData = schedule.map(r => r.price_kwh ?? null);
 
-  // LP shadow SOC curve — align by slot_ts
-  const lpSocMap = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, r.soc_start]));
-  const lpSocData = schedule.map(r => lpSocMap.get(r.slot) ?? null);
+  // Battery power: positive = charging, negative = discharging
+  function signedWatts(action, watts) {
+    if (action === 'discharge') return -(watts ?? 0);
+    if (action === 'charge_grid' || action === 'charge_solar') return watts ?? 0;
+    return 0;
+  }
+  const sBattWatts = schedule.map(r => signedWatts(r.action, r.watts));
+
+  // LP shadow SOC curve and watts — align by slot_ts
+  const lpSocMap   = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, r.soc_start]));
+  const lpWattsMap = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, signedWatts(r.action, r.watts)]));
+  const lpSocData   = schedule.map(r => lpSocMap.get(r.slot) ?? null);
+  const lpWattsData = schedule.map(r => lpWattsMap.has(r.slot) ? lpWattsMap.get(r.slot) : null);
   const sBarBg    = schedule.map(r => {
     const base = ACTION_BG[r.action] ?? ACTION_BG.idle;
     // Dim past slots
@@ -496,6 +506,30 @@ async function loadSchedule() {
           yAxisID: 'yPrice',
           order: 3,
         },
+        {
+          type: 'line',
+          label: 'Battery W (active)',
+          data: sBattWatts,
+          borderColor: '#6ae0c0',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          yAxisID: 'yPower',
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Battery W (LP shadow)',
+          data: lpWattsData,
+          borderColor: '#c084fc',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [3, 3],
+          yAxisID: 'yPower',
+          order: 2,
+          hidden: lpWattsData.every(v => v === null || v === 0),
+        },
       ],
     },
     options: {
@@ -511,6 +545,7 @@ async function loadSchedule() {
             label: ctx => {
               if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
               if (ctx.dataset.yAxisID === 'yPrice') return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
+              if (ctx.dataset.yAxisID === 'yPower') return `${ctx.dataset.label}: ${ctx.raw?.toFixed(0)} W`;
               return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             },
             afterBody: (items) => {
@@ -551,6 +586,8 @@ async function loadSchedule() {
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
+        yPower: { position: 'right', grid: { drawOnChartArea: false },
+                  title: { display: true, text: 'W', color: '#6ae0c0' } },
       },
     },
     plugins: [{ id: 'nowLine', afterDraw(chart) {

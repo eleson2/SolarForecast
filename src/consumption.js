@@ -110,6 +110,15 @@ export async function estimateConsumption(windowStart = null) {
           continue;
         }
 
+        // If yesterday's reading exceeds max_house_w it was likely EV charging —
+        // using it directly would over-estimate consumption and cause the optimizer
+        // to over-discharge. Fall back to flat_watts instead.
+        const maxHouseW = config.consumption?.max_house_w ?? Infinity;
+        if (maxHouseW < Infinity && yesterdayEntry.w > maxHouseW) {
+          estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
+          continue;
+        }
+
         let factor = 1.0;
         if (temps && forecastTemp !== null) {
           const hStr = String(h).padStart(2, '0');

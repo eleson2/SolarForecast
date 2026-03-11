@@ -102,7 +102,7 @@ router.get('/schedule', (req, res) => {
     lp_shadow: lpShadow ? {
       computed_at: lpShadow.computed_at,
       summary:     lpShadow.summary,
-      soc:         lpShadow.schedule.map(r => ({ slot: r.slot_ts, soc_start: r.soc_start, action: r.action })),
+      soc:         lpShadow.schedule.map(r => ({ slot: r.slot_ts, soc_start: r.soc_start, action: r.action, watts: r.watts })),
     } : null,
   });
 });
