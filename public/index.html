@@ -63,23 +63,6 @@
 
     .chart-wrap { position: relative; height: 220px; }
 
-    /* Battery schedule table */
-    .schedule-table-wrap { overflow-x: auto; max-height: 340px; overflow-y: auto; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    th {
-      text-align: left;
-      padding: 7px 10px;
-      color: #888;
-      border-bottom: 1px solid #2a2d3a;
-      position: sticky;
-      top: 0;
-      background: #1a1d27;
-      font-weight: 500;
-    }
-    td { padding: 6px 10px; border-bottom: 1px solid #1e2130; }
-    tr:hover td { background: #20243a; }
-    tr.now td { background: #1e3050; }
-
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -151,22 +134,6 @@
     <h2>Battery Schedule — Next 24 h</h2>
     <div class="summary-row" id="batterySummary"></div>
     <div class="chart-wrap" style="height:240px; margin-bottom:16px"><canvas id="scheduleChart"></canvas></div>
-    <div class="schedule-table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Action</th>
-            <th>Battery W</th>
-            <th>SOC start → end</th>
-            <th>Price (SEK/kWh)</th>
-            <th>Solar W</th>
-            <th>Load W</th>
-          </tr>
-        </thead>
-        <tbody id="scheduleBody"></tbody>
-      </table>
-    </div>
   </div>
 
   <!-- 6. Last 24h battery history: planned SOC + price + action -->
@@ -385,33 +352,6 @@ async function loadSchedule() {
     if (schedule[i].slot <= nowTs) currentIdx = i;
   }
 
-  const tbody = document.getElementById('scheduleBody');
-  tbody.innerHTML = schedule.map((row, i) => {
-    const badge = {
-      charge_grid:  '<span class="badge badge-charge">Charge</span>',
-      charge_solar: '<span class="badge badge-charge">Solar charge</span>',
-      discharge:    '<span class="badge badge-discharge">Discharge</span>',
-      sell:         '<span class="badge badge-sell">Sell</span>',
-      idle:         '<span class="badge badge-idle">Idle</span>',
-    }[row.action] ?? row.action;
-
-    const isNow = i === currentIdx ? 'class="now"' : '';
-    const watts = row.action === 'idle' ? '—' : `${row.watts}`;
-    return `<tr ${isNow}>
-      <td>${fmtTime(row.slot)}</td>
-      <td>${badge}</td>
-      <td>${watts}</td>
-      <td>${row.soc_start ?? '—'}% → ${row.soc_end ?? '—'}%</td>
-      <td>${row.price_kwh?.toFixed(3) ?? '—'}</td>
-      <td>${row.solar_watts ?? 0}</td>
-      <td>${row.consumption_watts ?? 0}</td>
-    </tr>`;
-  }).join('');
-
-  // Scroll current slot into view
-  const nowRow = tbody.querySelector('tr.now');
-  if (nowRow) nowRow.scrollIntoView({ block: 'center' });
-
   // Schedule chart
   const invCfg = inverter_config ?? { discharge_soc: 20, charge_soc: 90, peak_shaving: { enabled: false, default_kw: 4.5, schedule: [] } };
 
@@ -420,19 +360,6 @@ async function loadSchedule() {
   const sMinSoc   = schedule.map(r => computeMinReservedSOC(r, invCfg));
   const sPriceData = schedule.map(r => r.price_kwh ?? null);
 
-  // Battery power: positive = charging, negative = discharging
-  function signedWatts(action, watts) {
-    if (action === 'discharge') return -(watts ?? 0);
-    if (action === 'charge_grid' || action === 'charge_solar') return watts ?? 0;
-    return 0;
-  }
-  const sBattWatts = schedule.map(r => signedWatts(r.action, r.watts));
-
-  // LP shadow SOC curve and watts — align by slot_ts
-  const lpSocMap   = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, r.soc_start]));
-  const lpWattsMap = new Map((lp_shadow?.soc ?? []).map(r => [r.slot, signedWatts(r.action, r.watts)]));
-  const lpSocData   = schedule.map(r => lpSocMap.get(r.slot) ?? null);
-  const lpWattsData = schedule.map(r => lpWattsMap.has(r.slot) ? lpWattsMap.get(r.slot) : null);
   const sBarBg    = schedule.map(r => {
     const base = ACTION_BG[r.action] ?? ACTION_BG.idle;
     // Dim past slots
@@ -483,19 +410,6 @@ async function loadSchedule() {
         },
         {
           type: 'line',
-          label: 'LP SOC % (shadow)',
-          data: lpSocData,
-          borderColor: '#a78bfa',
-          backgroundColor: 'transparent',
-          pointRadius: 0,
-          borderWidth: 1.5,
-          borderDash: [3, 3],
-          yAxisID: 'ySoc',
-          order: 2,
-          hidden: lpSocData.every(v => v === null),
-        },
-        {
-          type: 'line',
           label: 'Price SEK/kWh',
           data: sPriceData,
           borderColor: '#f5c842',
@@ -505,30 +419,6 @@ async function loadSchedule() {
           borderDash: [4, 3],
           yAxisID: 'yPrice',
           order: 3,
-        },
-        {
-          type: 'line',
-          label: 'Battery W (active)',
-          data: sBattWatts,
-          borderColor: '#6ae0c0',
-          backgroundColor: 'transparent',
-          pointRadius: 0,
-          borderWidth: 1.5,
-          yAxisID: 'yPower',
-          order: 2,
-        },
-        {
-          type: 'line',
-          label: 'Battery W (LP shadow)',
-          data: lpWattsData,
-          borderColor: '#c084fc',
-          backgroundColor: 'transparent',
-          pointRadius: 0,
-          borderWidth: 1.5,
-          borderDash: [3, 3],
-          yAxisID: 'yPower',
-          order: 2,
-          hidden: lpWattsData.every(v => v === null || v === 0),
         },
       ],
     },
@@ -545,7 +435,6 @@ async function loadSchedule() {
             label: ctx => {
               if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
               if (ctx.dataset.yAxisID === 'yPrice') return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
-              if (ctx.dataset.yAxisID === 'yPower') return `${ctx.dataset.label}: ${ctx.raw?.toFixed(0)} W`;
               return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             },
             afterBody: (items) => {
@@ -586,8 +475,6 @@ async function loadSchedule() {
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
-        yPower: { position: 'right', grid: { drawOnChartArea: false },
-                  title: { display: true, text: 'W', color: '#6ae0c0' } },
       },
     },
     plugins: [{ id: 'nowLine', afterDraw(chart) {
