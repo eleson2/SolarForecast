@@ -116,7 +116,7 @@ export default {
         auth_pass: '',      // set a password to enable
     },
     price: {
-        source: 'elprisetjust',     // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)
+        source: 'elprisetjust',     // Must match a filename in src/prices/ (without .js extension)
         region: 'SE3',              // Provider-specific region code
         currency: 'SEK',            // Display currency
         day_ahead_hour: 13,         // Hour (UTC) when tomorrow's prices publish

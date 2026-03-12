@@ -1,0 +1,42 @@
+Price Fetcher Refactor — Agnostic Dynamic Provider Loading
+==========================================================
+
+Goal: price-fetcher.js should not know which providers exist.
+      Convention: config.price.source must match a filename in src/prices/.
+
+TODO
+----
+[x] 1. Edit src/price-fetcher.js
+        - Remove: import * as elprisetjust from './prices/elprisetjust.js'
+        - Remove: import * as awattar from './prices/awattar.js'
+        - Remove: const providers = { elprisetjust, awattar }
+        - Replace provider lookup with dynamic import:
+            const source = config.price.source;
+            let provider;
+            try {
+              provider = await import(`./prices/${source}.js`);
+            } catch {
+              throw new Error(`Unknown price source '${source}': no file at src/prices/${source}.js`);
+            }
+        - Call: provider.fetchPricesForDate(dateStr, config.price.region)
+
+[x] 2. Edit config.js
+        - Update comment on price.source:
+          Before: // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)
+          After:  // Must match a filename in src/prices/ (without .js extension)
+
+[x] 3. Edit .claude/CLAUDE.md — "Adding a price provider" section
+        - Remove "Register in src/price-fetcher.js" step
+        - Replace with: "Set config.price.source to the filename (without .js). No other changes."
+
+[x] 4. Edit battery-optimizer.md — "Adding a provider" section
+        - Removed import+registry snippet
+        - Replaced with: set config.price.source, no other changes needed
+
+[ ] 5. Manual verification
+        - Run: node run-battery-once.js
+        - Confirm prices are fetched and battery schedule is written without errors
+        - Test bad source name: temporarily set config.price.source = 'nonexistent',
+          confirm clear error message is thrown, then restore
+
+[ ] 6. Commit with message: "refactor: dynamic price provider loading — source name = filename"

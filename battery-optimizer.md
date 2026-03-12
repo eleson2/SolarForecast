@@ -637,12 +637,7 @@ Requirements:
   expand each hour into 4×15-min slots with the same price.
 - Include raw API response in `raw` for archiving.
 
-Then register the provider in `src/price-fetcher.js`:
-
-```javascript
-import * as myProvider from './prices/my-provider.js';
-const providers = { elprisetjust, awattar, myProvider };
-```
+Then set `config.price.source` to the filename (without `.js`). No other changes needed — `src/price-fetcher.js` loads providers dynamically by convention.
 
 ---
 

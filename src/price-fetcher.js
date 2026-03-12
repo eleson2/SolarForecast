@@ -4,13 +4,8 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import { upsertPricesBatch } from './db.js';
 
-import * as elprisetjust from './prices/elprisetjust.js';
-import * as awattar from './prices/awattar.js';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RAW_DIR = path.join(__dirname, '..', 'data', 'raw');
-
-const providers = { elprisetjust, awattar };
 
 /**
  * Format a Date as "YYYY-MM-DD" in configured timezone.
@@ -30,9 +25,13 @@ function localDate(date) {
  */
 async function fetchPricesForDate(date) {
   const source = config.price.source;
-  const provider = providers[source];
-  if (!provider) {
-    throw new Error(`Unknown price source: "${source}". Available: ${Object.keys(providers).join(', ')}`);
+  let provider;
+  try {
+    provider = await import(`./prices/${source}.js`);
+  } catch {
+    throw new Error(
+      `Unknown price source '${source}': no file found at src/prices/${source}.js`
+    );
   }
 
   const dateStr = localDate(date);
