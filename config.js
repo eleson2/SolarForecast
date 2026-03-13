@@ -65,7 +65,7 @@ export default {
         // Confirmed at 4.0 kW for this installation via Growatt app.
         max_export_w: 4000,
         transfer_import_kwh: 0.50,  // nätavgift import (SEK/kWh)
-        transfer_export_kwh: 0.50,  // nätavgift export (SEK/kWh) — often 0
+        transfer_export_kwh: 0.00,  // nätavgift export (SEK/kWh) — often 0
         energy_tax_kwh: 0.0,       // energiskatt (SEK/kWh) — only on import
     },
     consumption: {
