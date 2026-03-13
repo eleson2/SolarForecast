@@ -55,8 +55,15 @@ export default {
         soc_deviation_threshold: 10,
     },
     grid: {
+        // Set sell_enabled: true to allow the optimizer to plan battery→grid export slots.
+        // Revenue per kWh: spot_price × sell_price_factor − transfer_export_kwh.
+        // Only profitable when spot prices are high enough to overcome the efficiency loss
+        // and transfer fee. Requires the inverter to support export (check grid operator rules).
         sell_enabled: false,
         sell_price_factor: 0.80,
+        // Maximum power the grid operator allows you to export (W).
+        // Confirmed at 4.0 kW for this installation via Growatt app.
+        max_export_w: 4000,
         transfer_import_kwh: 0.50,  // nätavgift import (SEK/kWh)
         transfer_export_kwh: 0.50,  // nätavgift export (SEK/kWh) — often 0
         energy_tax_kwh: 0.0,       // energiskatt (SEK/kWh) — only on import

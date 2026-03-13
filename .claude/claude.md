@@ -60,7 +60,7 @@ Battery pipeline:
 ```
 price-fetcher.js + consumption.js + driver.getState()
         ↓
-optimizer.js → battery_schedule (DB) → inverter-dispatcher.js → driver.applySchedule()
+optimizer-lp.js → battery_schedule (DB) → inverter-dispatcher.js → driver.applySchedule()
 ```
 
 ### Key files
@@ -72,7 +72,7 @@ optimizer.js → battery_schedule (DB) → inverter-dispatcher.js → driver.app
 | `src/db.js` | SQLite connection, schema init, all query helpers |
 | `src/timeutils.js` | Timezone-safe timestamp parsing — operates on `"YYYY-MM-DDTHH:MM"` strings directly, no `Date` objects |
 | `src/model.js` | Physics fallback + empirical blending for production forecast |
-| `src/optimizer.js` | Greedy solar-aware charge/discharge pairing |
+| `src/optimizer-lp.js` | LP optimizer (HiGHS) — sole optimizer; globally optimal 24h schedule |
 | `src/inverter-dispatcher.js` | Selects inverter driver from `config.inverter.brand` |
 | `src/inverters/growatt-modbus.js` | Modbus TCP driver for Growatt MOD TL3-XH |
 | `src/inverters/growatt.js` | Growatt cloud API driver (MIN/MIX series) |

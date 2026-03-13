@@ -322,7 +322,7 @@ async function loadSolar() {
 // --- Battery schedule ---
 async function loadSchedule() {
   const data = await fetch('/battery/schedule').then(r => r.json());
-  const { schedule, summary, inverter_config, lp_shadow } = data;
+  const { schedule, summary, inverter_config, lp_shadow, sell_shadow } = data;
 
   // Summary KPIs
   const s = summary;
@@ -338,11 +338,23 @@ async function loadSchedule() {
       <div class="lbl">LP savings (shadow) <span class="${diffCls}" style="font-size:0.85em">${diffStr}</span></div>
     </div>`;
   }
+  let sellKpi = '';
+  if (sell_shadow?.summary) {
+    const sellSav = sell_shadow.summary.estimated_savings;
+    const extra   = sellSav - savings;
+    const extraStr = (extra >= 0 ? '+' : '') + extra.toFixed(2);
+    const extraCls = extra > 0.05 ? 'green' : extra < -0.05 ? 'red' : '';
+    sellKpi = `<div class="kpi" title="Extra savings if sell-to-grid were enabled — shadow run, not applied">
+      <div class="val ${extraCls}">${extraStr} SEK</div>
+      <div class="lbl">Sell-to-grid potential</div>
+    </div>`;
+  }
   document.getElementById('batterySummary').innerHTML = `
     <div class="kpi"><div class="val">${s.estimated_cost_with_battery.toFixed(2)} SEK</div><div class="lbl">Cost with battery</div></div>
     <div class="kpi"><div class="val">${s.estimated_cost_without_battery.toFixed(2)} SEK</div><div class="lbl">Cost without battery</div></div>
     <div class="kpi"><div class="val ${savings >= 0 ? 'green' : 'red'}">${savings >= 0 ? '+' : ''}${savings.toFixed(2)} SEK</div><div class="lbl">Estimated savings (24 h)</div></div>
     ${lpKpi}
+    ${sellKpi}
   `;
 
   const nowTs = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Stockholm' }).replace(' ', 'T').slice(0, 16);

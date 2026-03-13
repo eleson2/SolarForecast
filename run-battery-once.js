@@ -2,7 +2,7 @@ import fs from 'fs';
 import config from './config.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
-import { runOptimizer } from './src/optimizer.js';
+import { runOptimizer } from './src/optimizer-lp.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 
 const args = process.argv.slice(2);
@@ -49,7 +49,7 @@ async function main() {
   const fromTs = localTs(currentSlot);
   const toTs = localTs(endSlot);
 
-  const { schedule, summary } = runOptimizer(fromTs, toTs, consumption, options);
+  const { schedule, summary } = await runOptimizer(fromTs, toTs, consumption, options);
 
   const output = {
     generated_at: now.toISOString(),

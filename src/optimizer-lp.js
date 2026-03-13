@@ -1,25 +1,29 @@
 /**
  * LP-based battery optimizer.
- * Same public interface as optimizer.js — drop-in replacement candidate.
+ * Sole battery optimizer — replaces the former greedy optimizer.js.
  *
  * Formulation (96 × 15-min slots, N slots total):
  *   Variables per slot t:
  *     cg_t   — grid charge power (W)
- *     d_t    — discharge power (W)
+ *     d_t    — discharge to house (W)   [bounded by grid deficit]
  *     cs_t   — solar charge power (W)   [free energy, zero cost]
+ *     sell_t — battery→grid export (W)  [only when grid.sell_enabled]
  *     s_t    — battery SOC (Wh)         [s_0 … s_N, N+1 values]
  *
- *   Objective:  minimize Σ buy_price[t] * cg_t * h/1000
- *                       − Σ buy_price[t] * d_t  * h/1000
- *     (h = 0.25 h per slot; /1000 converts W→kW; buy_price in currency/kWh)
+ *   Objective:  minimize Σ buy_price[t]  * cg_t   * h/1000
+ *                       − Σ buy_price[t]  * d_t    * h/1000
+ *                       − Σ sell_price[t] * sell_t * h/1000   [when sell_enabled]
+ *     (h = 0.25 h per slot; /1000 converts W→kW)
  *
  *   Constraints:
- *     SOC continuity:  s_{t+1} = s_t + η·h·(cg_t + cs_t) − h·d_t   ∀t
+ *     SOC continuity:  s_{t+1} = s_t + η·h·(cg_t + cs_t) − h·d_t − h·sell_t   ∀t
  *     Initial SOC:     s_0 fixed to startSocWh
  *     SOC bounds:      min_soc_wh ≤ s_t ≤ max_soc_wh
  *     Charge bounds:   0 ≤ cg_t ≤ max_charge_w
  *     Discharge bound: 0 ≤ d_t  ≤ min(max_discharge_w, grid_deficit_w[t])
  *     Solar bound:     0 ≤ cs_t ≤ min(max_charge_w, solar_surplus_w[t])
+ *     Sell bound:      0 ≤ sell_t ≤ min(max_export_w, max_discharge_w)  [when sell_enabled]
+ *     Joint discharge: d_t + sell_t ≤ max_discharge_w                   [when sell_enabled]
  *
  * Mutual exclusion (charge + discharge same slot) is not needed explicitly —
  * efficiency < 1 makes round-tripping always net-negative, so the solver
@@ -84,7 +88,7 @@ function logWindows(label, actionSlots, priceFn) {
 
 /**
  * Run the LP optimizer.
- * Same signature as the greedy runOptimizer() — async due to HiGHS WASM loading.
+ * async due to HiGHS WASM loading on first call.
  *
  * @param {string} fromTs
  * @param {string} toTs
@@ -98,6 +102,9 @@ function logWindows(label, actionSlots, priceFn) {
 export async function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
   const bat  = config.battery;
   const grid = config.grid;
+
+  // options.sellEnabled overrides config.grid.sell_enabled (used for shadow runs)
+  const effectiveSellEnabled = options.sellEnabled ?? grid.sell_enabled;
 
   // ── 1. Gather inputs ────────────────────────────────────────────────────────
 
@@ -144,7 +151,7 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     const solar       = solarMap.get(p.slot_ts) ?? 0;
     const consumption = consumptionMap.get(p.slot_ts) ?? config.consumption.flat_watts;
     const buyPrice    = p.spot_price + grid.transfer_import_kwh + grid.energy_tax_kwh;
-    const sellPrice   = grid.sell_enabled
+    const sellPrice   = effectiveSellEnabled
       ? p.spot_price * grid.sell_price_factor - grid.transfer_export_kwh : 0;
     return {
       slot_ts: p.slot_ts, spot_price: p.spot_price, buy_price: buyPrice,
@@ -223,21 +230,38 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     const coeff = (slots[t].buy_price * h / 1000).toFixed(8);
     objLines.push(`-${coeff} d_${t}`);
   }
+  // Sell revenue: each kWh exported earns sell_price — subtract from objective (minimise cost)
+  if (effectiveSellEnabled) {
+    for (let t = 0; t < N; t++) {
+      if (slots[t].sell_price > 0) {
+        const coeff = (slots[t].sell_price * h / 1000).toFixed(8);
+        objLines.push(`-${coeff} sell_${t}`);
+      }
+    }
+  }
   // Soft penalty for low terminal SOC (subtract bonus for s_N — minimize means solver prefers high s_N)
   objLines.push(`-${endSocBonusCoeff} s_${N}`);
 
   // Wrap long objective over multiple lines (LP format allows leading whitespace)
   const objStr = objLines.join('\n    + ').replace(/\+ -/g, '- ');
 
-  // SOC continuity constraints: s_{t+1} - s_t - etaH*cg_t - etaH*cs_t + h*d_t = 0
+  // SOC continuity constraints: s_{t+1} - s_t - etaH*cg_t - etaH*cs_t + h*d_t [+ h*sell_t] = 0
   const constrLines = [];
   for (let t = 0; t < N; t++) {
     constrLines.push(
       `  sc_${t}: - s_${t} + s_${t + 1}` +
       ` - ${etaH.toFixed(8)} cg_${t}` +
       ` - ${etaH.toFixed(8)} cs_${t}` +
-      ` + ${h.toFixed(8)} d_${t} = 0`
+      ` + ${h.toFixed(8)} d_${t}` +
+      (effectiveSellEnabled ? ` + ${h.toFixed(8)} sell_${t}` : '') +
+      ` = 0`
     );
+  }
+  // Joint discharge: battery output (house + grid export) cannot exceed max_discharge_w
+  if (effectiveSellEnabled) {
+    for (let t = 0; t < N; t++) {
+      constrLines.push(`  jd_${t}: d_${t} + sell_${t} <= ${bat.max_discharge_w.toFixed(4)}`);
+    }
   }
 
   // Variable bounds
@@ -250,6 +274,7 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     boundLines.push(`  ${minSocWh.toFixed(4)} <= s_${t} <= ${maxSocWh.toFixed(4)}`);
   }
   // Decision variable bounds
+  const maxExportW = effectiveSellEnabled ? (grid.max_export_w ?? bat.max_discharge_w) : 0;
   for (let t = 0; t < N; t++) {
     const maxDis = Math.min(bat.max_discharge_w,
                             Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
@@ -257,9 +282,14 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
     const psLimitW = peakShavingLimitW(slots[t].slot_ts);
     const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts));
+    const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
+      ? Math.min(maxExportW, bat.max_discharge_w) : 0;
     boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);
     boundLines.push(`  0 <= d_${t}  <= ${maxDis.toFixed(4)}`);
     boundLines.push(`  0 <= cs_${t} <= ${maxSol.toFixed(4)}`);
+    if (effectiveSellEnabled) {
+      boundLines.push(`  0 <= sell_${t} <= ${maxSellW.toFixed(4)}`);
+    }
   }
 
   const lpStr =
@@ -295,11 +325,13 @@ End`;
   const NOISE_W = 10; // watts — ignore numerical noise / marginal round-trips below this threshold
 
   for (let t = 0; t < N; t++) {
-    const cgW  = Math.max(0, result.Columns[`cg_${t}`]?.Primal ?? 0);
-    const dW   = Math.max(0, result.Columns[`d_${t}`]?.Primal  ?? 0);
-    const csW  = Math.max(0, result.Columns[`cs_${t}`]?.Primal ?? 0);
-    const socT = result.Columns[`s_${t}`]?.Primal  ?? startSocWh;
-    const socN = result.Columns[`s_${t + 1}`]?.Primal ?? startSocWh;
+    const cgW   = Math.max(0, result.Columns[`cg_${t}`]?.Primal   ?? 0);
+    const dW    = Math.max(0, result.Columns[`d_${t}`]?.Primal    ?? 0);
+    const csW   = Math.max(0, result.Columns[`cs_${t}`]?.Primal   ?? 0);
+    const sellW = effectiveSellEnabled
+      ? Math.max(0, result.Columns[`sell_${t}`]?.Primal ?? 0) : 0;
+    const socT  = result.Columns[`s_${t}`]?.Primal     ?? startSocWh;
+    const socN  = result.Columns[`s_${t + 1}`]?.Primal ?? startSocWh;
 
     slots[t].soc_start = Math.round((socT / capacityWh) * 100 * 10) / 10;
     slots[t].soc_end   = Math.round((socN / capacityWh) * 100 * 10) / 10;
@@ -311,6 +343,9 @@ End`;
     } else if (dW > NOISE_W) {
       slots[t].action = 'discharge';
       slots[t].watts  = Math.round(dW);
+    } else if (sellW > NOISE_W) {
+      slots[t].action = 'sell';
+      slots[t].watts  = Math.round(sellW);
     } else if (csW > NOISE_W) {
       slots[t].action = 'charge_solar';
       slots[t].watts  = Math.round(csW);
@@ -341,6 +376,13 @@ End`;
         costWith += Math.max(0, gridNeededKwh - dischargeKwh) * slot.buy_price;
         break;
       }
+      case 'sell': {
+        // Battery exports to grid; house consumption still sourced from grid if solar insufficient
+        const sellKwh = slot.watts * h / 1000;
+        costWith += gridNeededKwh * slot.buy_price;   // any remaining house import
+        costWith -= sellKwh * slot.sell_price;         // export revenue (negative cost)
+        break;
+      }
       default:
         costWith += gridNeededKwh * slot.buy_price;
     }
@@ -361,6 +403,7 @@ End`;
     ` (${summary.estimated_cost_without_battery} → ${summary.estimated_cost_with_battery})`);
   logWindows('Charge grid', slots.filter(s => s.action === 'charge_grid'), s => s.buy_price);
   logWindows('Discharge  ', slots.filter(s => s.action === 'discharge'),   s => s.buy_price);
+  logWindows('Sell       ', slots.filter(s => s.action === 'sell'),        s => s.sell_price);
 
   // ── 9. Write to DB (skip on dry_run) ─────────────────────────────────────────
 

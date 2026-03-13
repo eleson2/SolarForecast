@@ -9,12 +9,11 @@ import { learnConsumptionModel } from './src/consumption-learner.js';
 import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
-import { runOptimizer } from './src/optimizer.js';
 import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
 import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride } from './src/override.js';
-import { setLpShadow } from './src/battery-api.js';
+import { setLpShadow, setSellShadow } from './src/battery-api.js';
 import config from './config.js';
 import app from './src/api.js';
 import log from './src/logger.js';
@@ -121,14 +120,24 @@ async function batteryPipeline() {
       log.info('battery', `Intra-day solar scalar: ${clamped.toFixed(2)} (actual/forecast=${(rawRatio * 100).toFixed(0)}%)`);
     }
 
-    // LP optimizer is primary. Greedy runs as fallback if LP returns no schedule.
-    let { summary, schedule } = await runOptimizerLP(fromTs, toTs, consumption, options);
+    const { summary, schedule } = await runOptimizerLP(fromTs, toTs, consumption, options);
     if (!schedule.length) {
-      log.warn('battery', 'LP returned no schedule — falling back to greedy');
-      ({ summary, schedule } = runOptimizer(fromTs, toTs, consumption, options));
-    } else {
-      setLpShadow(summary, schedule); // keep API shadow field up to date
-      log.info('battery', `LP optimizer: savings ${summary?.estimated_savings} ${config.price.currency}`);
+      log.warn('battery', 'LP returned no schedule — skipping DB write');
+      return;
+    }
+    setLpShadow(summary, schedule); // keep API shadow field up to date
+    log.info('battery', `LP optimizer: savings ${summary?.estimated_savings} ${config.price.currency}`);
+
+    // Sell shadow: if sell is currently disabled, run a dry-run with sell enabled
+    // to show potential extra savings on the dashboard without affecting the schedule.
+    if (!config.grid.sell_enabled) {
+      const { summary: sellSum } = await runOptimizerLP(fromTs, toTs, consumption,
+        { ...options, dry_run: true, sellEnabled: true });
+      if (sellSum) {
+        setSellShadow(sellSum);
+        const extra = (sellSum.estimated_savings - summary.estimated_savings).toFixed(2);
+        log.info('battery', `Sell shadow (dry-run): savings ${sellSum.estimated_savings} ${config.price.currency} (extra ${extra >= 0 ? '+' : ''}${extra})`);
+      }
     }
 
     log.info('battery', 'Battery optimizer pipeline complete');

@@ -11,7 +11,7 @@ the inverter.
 - Learns an empirical correction matrix from actual vs forecast production
 - Applies a recency bias scalar to catch short-term deviations (dirty panel etc.)
 - Fetches day-ahead spot prices (elprisetjustnu.se or aWATTar)
-- Runs a greedy optimizer to plan 24 h of battery charge/discharge slots
+- Runs an LP optimizer (HiGHS) to plan 24 h of battery charge/discharge slots
 - Pushes the active slot to the inverter every 15 minutes via Modbus TCP
 - Replans after every executed command so the schedule stays fresh
 

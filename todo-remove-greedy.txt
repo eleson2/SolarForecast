@@ -1,0 +1,51 @@
+Remove Greedy Optimizer
+=======================
+
+Goal: delete src/optimizer.js and all references to it. LP is the sole optimizer.
+
+TODO
+----
+[x] 1. Edit scheduler.js
+        - Removed import of optimizer.js
+        - Removed fallback block; LP empty schedule now logs warning and returns early
+
+[x] 2. Edit run-battery-once.js
+        - Swapped import to optimizer-lp.js
+        - Added await to runOptimizer call
+
+[x] 3. Edit dry-run-tomorrow.js
+        - Swapped import to optimizer-lp.js
+        - Added await to runOptimizer call
+
+[x] 4. Delete run-compare-optimizers.js
+
+[x] 5. Delete src/optimizer.js
+
+[x] 6. Update .claude/CLAUDE.md
+        - Updated key files table: optimizer.js → optimizer-lp.js
+        - Updated battery pipeline diagram
+
+[x] 7. Update design.md
+        - Updated file tree: optimizer.js → optimizer-lp.js
+        - Updated description from "greedy" to LP
+
+[x] 8. Update battery-optimizer.md
+        - Status table: removed greedy row, updated LP row to "Primary (sole optimizer)"
+        - Removed LP comparison tool row
+        - Removed "Greedy strategy (v1)" section
+        - Removed comparison workflow block
+        - Removed "Key differences vs greedy" table
+        - Removed migration plan
+        - Updated file tree: removed optimizer.js, updated optimizer-lp.js description
+
+[x] 9. Update todo.md
+        - Removed "Promote LP" item
+
+[ ] 10. Manual verification
+        - Run: node run-battery-once.js
+        - Confirm schedule is generated without errors
+        - Run: node dry-run-tomorrow.js
+        - Confirm tomorrow forecast runs without errors
+        - Confirm run-compare-optimizers.js is gone (no import errors in scheduler)
+
+[ ] 11. Commit: "remove greedy optimizer — LP is sole optimizer"

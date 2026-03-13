@@ -10,7 +10,7 @@
 
 import config from './config.js';
 import { fetchPrices } from './src/price-fetcher.js';
-import { runOptimizer } from './src/optimizer.js';
+import { runOptimizer } from './src/optimizer-lp.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 
 const args = process.argv.slice(2);
@@ -93,7 +93,7 @@ async function main() {
   console.log(`\nRunning optimizer for ${fromTs} → ${toTs}`);
   console.log(`Consumption: ${CONSUMPTION_W}W flat\n`);
 
-  const { schedule, summary } = runOptimizer(fromTs, toTs, consumption, options);
+  const { schedule, summary } = await runOptimizer(fromTs, toTs, consumption, options);
 
   if (!schedule || schedule.length === 0) {
     console.log('No schedule generated — check if price/solar data exists in DB.');

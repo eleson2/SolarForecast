@@ -8,7 +8,7 @@ This project has two parts:
    Open source, useful to anyone with solar panels. **Done.**
 2. **Battery Optimizer** ([battery-optimizer.md](battery-optimizer.md)) — use solar forecast +
    electricity prices to plan when to charge, discharge, or sell battery capacity.
-   **Implemented** — greedy optimizer, price fetcher, consumption estimator, inverter control (Growatt cloud API + Modbus TCP).
+   **Implemented** — LP optimizer (HiGHS), price fetcher, consumption estimator, inverter control (Growatt cloud API + Modbus TCP).
 
 ## Overview
 
@@ -73,7 +73,7 @@ solar-forecast/
 │   ├── learner.js        # Update correction_matrix from actuals vs predicted
 │   ├── smoother.js       # Smooth correction_matrix, manage observation weights
 │   ├── consumption.js    # Yesterday's consumption + temperature correction
-│   ├── optimizer.js      # Battery charge/discharge optimizer (greedy v1)
+│   ├── optimizer-lp.js   # Battery charge/discharge optimizer (LP, HiGHS)
 │   ├── price-fetcher.js  # Pluggable price provider dispatcher
 │   ├── prices/           # Price providers (elprisetjust, awattar)
 │   ├── inverters/        # Pluggable inverter drivers (growatt cloud, growatt-modbus, …)

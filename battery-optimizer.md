@@ -22,8 +22,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Design                   | Done        | This document                            |
 | Price fetcher            | Done        | `src/price-fetcher.js` — pluggable provider dispatch |
 | Consumption estimator    | Done        | `src/consumption.js` — yesterday + temp correction |
-| Optimizer engine (greedy)| Fallback    | `src/optimizer.js` — greedy v1, used only if LP returns no schedule |
-| Optimizer engine (LP)    | **Primary** | `src/optimizer-lp.js` — HiGHS LP, globally optimal, writes to DB; greedy is fallback |
+| Optimizer engine (LP)    | **Primary (sole optimizer)** | `src/optimizer-lp.js` — HiGHS LP, globally optimal, writes to DB |
 | Battery state tracker    | Done        | Integrated in optimizer (SOC forward pass) |
 | Inverter integration     | Growatt MIN + MOD done | See [`inverter-integration.md`](inverter-integration.md) — Cloud API + Modbus TCP drivers |
 | Live SOC seeding         | Done        | Optimizer accepts `options.startSoc` from inverter; scheduler + CLI read SOC before each run |
@@ -36,7 +35,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Hourly model re-run      | Done        | `learnPipeline` calls `runModel()` after the learner updates the correction matrix — ensures intraday corrections flow into remaining hours within ~1h, not up to 6h |
 | Hour-boundary fix        | Done        | `getReadingsForForecast` floors `fromTs` to hour start so :15/:30/:45 optimizer runs don't miss the current partial hour's solar data |
 | Soft transient reset     | Done        | `executePipeline` skips `resetToDefault` for ETIMEDOUT/ECONNREFUSED — leaves inverter in last-written state |
-| Charge/discharge window logging | Done | `logWindows()` in `optimizer.js` groups consecutive slots into time windows with kWh and avg price |
+| Charge/discharge window logging | Done | `logWindows()` groups consecutive slots into time windows with kWh and avg price |
 | Cloud-cover suppression  | Done        | `model.js` applies `cloudFactor = 1 - (cloud_cover/100) * cloud_suppression_max` to every forecast hour; `cloud_suppression_max` (default 0.65) is in `config.learning`; at 100% cloud the forecast is scaled to ~35% of the irradiance-only value |
 | Intra-day solar scalar   | Done        | `batteryPipeline` calls `getIntradaySolarRatio(today)` — ratio of actual-to-forecast for completed daylight hours — and passes it to the optimizer as `options.intradayScalar`; optimizer multiplies remaining-day solar forecast values by this scalar before planning |
 | Temporal feasibility correction | Done | After Phase B, a correction loop simulates forward SOC and detects discharge slots that would be cancelled (executed < 50% of planned). It removes the cheapest earlier discharge to free SOC for the higher-value later slot, repeating up to 20 times. Prevents low-margin early discharges (e.g. 0.70 €/kWh at 16:00) from depleting the battery before the price peak (e.g. 1.11 €/kWh at 19:00). |
@@ -45,7 +44,6 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
 | EV-aware scheduling      | Deferred    | EV charging managed externally via Home Assistant PV-surplus automation; this software will not implement it |
-| LP comparison tool        | Done        | `run-compare-optimizers.js` — runs both optimizers on live data, prints slot diff table |
 | LP terminal SOC penalty   | Done        | Soft bonus `−avgBuyPrice×0.1×h/1000 × s_N` in LP objective discourages draining battery at end of 24h window, preventing reactive SOC deviation guard from triggering on next cycle |
 | LP noise threshold        | Done        | `NOISE_W` reduced from 50W to 10W — previously suppressed up to 12.5 Wh/slot of valid operations |
 | Consumption EV filter     | Done        | `consumption.js` Path 2: if yesterday's hourly reading > `config.consumption.max_house_w`, falls back to `flat_watts` — prevents EV charging spikes from inflating consumption estimates |
@@ -129,30 +127,6 @@ After solving, each slot is assigned one action:
 
 SOC values are read directly from the `s_t` variables — no forward simulation needed.
 
-### Comparison workflow
-
-```bash
-# Compare both optimizers on live data (greedy writes to DB, LP runs dry_run):
-node run-compare-optimizers.js
-
-# With manual SOC override (useful when inverter is offline):
-node run-compare-optimizers.js --soc 61
-```
-
-Output: colour-coded slot-by-slot diff table + savings summary with LP vs greedy advantage.
-
-### Key differences vs greedy
-
-| Aspect | Greedy | LP |
-|--------|--------|-----|
-| Temporal ordering | Enforced by slot index check (`>=`) | Enforced by SOC continuity constraints |
-| SOC tracking | Forward pass after pairing | Embedded in the LP (`s_t` variables) |
-| Solar headroom | Global confidence-weighted deduction | Per-slot `cs_t` bounds — no confidence multiplier needed |
-| Overnight recharge | Phase C heuristic (depletion detection) | Automatic — solver sees all 96 slots simultaneously |
-| Night charge → morning peak | Phase A pairing | Direct — LP optimises across the full horizon |
-| Correction loop | Up to 20 iterations of swap logic | Not needed |
-| Sell-to-grid | `sell` action modeled | Not yet modeled in objective |
-
 **Charge timing tiebreaker:** When overnight prices are flat, HiGHS may pick a degenerate later charge slot with identical cost. A small epsilon (`avgBuyPrice × 0.005 SEK/kWh`) is added linearly to `cg_t` coefficients, making the solver prefer earlier charge slots among equals. This is 10–40× smaller than any price difference the optimizer would act on, so it cannot override genuine late-night price dips.
 
 **Peak shaving charge rate cap:** When `config.peak_shaving.enabled` is true, the grid import cap (e.g. 4.4 kW) limits how fast the battery can charge from the grid. The LP enforces this per-slot as `cg_t ≤ max(0, peakShavingW[t] − consumption_watts[t])`, matching the physical reality that consumption and charging share the same grid connection. Time-of-day schedule overrides (`peak_shaving.schedule`) are also applied per slot.
@@ -170,19 +144,7 @@ const { schedule, summary } = await runOptimizer(fromTs, toTs, consumptionEstima
 });
 ```
 
-Drop-in replacement for `src/optimizer.js` — same parameters, same return shape. The only difference is `async`: the greedy `runOptimizer` is synchronous; the LP version is `async` because HiGHS loads a WASM module on first call.
-
-### Migration plan
-
-LP is shadow-only (comparison via `run-compare-optimizers.js`) until behaviour is validated across diverse price curves and seasons. When ready to promote, swap the import in `scheduler.js`:
-
-```javascript
-// Before:
-import { runOptimizer } from './src/optimizer.js';
-// After:
-import { runOptimizer } from './src/optimizer-lp.js';
-// And add await to the call site in batteryPipeline
-```
+`runOptimizer` is `async` — HiGHS loads a WASM module on first call. Call with `await`.
 
 ---
 
@@ -359,94 +321,6 @@ buy_price      = spot_price + transfer_import + energy_tax  (per kWh)
 sell_price     = spot_price × sell_factor − transfer_export (per kWh)
 ```
 
-### Greedy strategy (v1) — solar-aware pairing
-
-The optimizer pairs cheap charge slots with expensive discharge slots, but is
-**solar-aware**: it only charges enough to cover actual grid deficits.
-
-Before pairing, it computes how much of the battery's empty headroom solar is
-expected to fill, and reserves the rest for grid charging:
-
-```
-solarAbsorbWh = min(solarSurplusWh × solar_forecast_confidence,
-                    batteryRoomWh − min_grid_charge_kwh × 1000)
-gridHeadroomWh = max(0, batteryRoomWh − solarAbsorbWh)
-```
-
-- `solar_forecast_confidence` (default 0.7) discounts the forecast to account for
-  uncertainty — clouds, seasonal model errors.
-- `min_grid_charge_kwh` (default 4.0 kWh) is a hard floor: even if the solar forecast
-  is large enough to absorb the entire battery, this many kWh of headroom are always
-  reserved for grid charging. **Exception:** if total forecast solar ≥ battery room +
-  total forecast consumption, the floor is waived — solar alone will fill the battery
-  and cover all loads, so grid charging is never needed.
-- `max_solar_for_grid_charge_w` (default 100 W) restricts grid-charge candidate slots
-  to hours where the solar forecast is below this watt threshold. Any slot forecasting
-  more than 100 W of solar is excluded — the battery will charge for free via
-  `charge_solar` so grid-charging there is wasteful. Night and heavy-overcast slots
-  (≤ 100 W) remain eligible.
-
-The optimizer logs this calculation on each run:
-```
-[optimizer] Solar-aware: 17.1 kWh forecast × 0.7 confidence = 3.7 kWh credited
-            (cap 3.7 kWh), grid headroom 4.0 kWh
-[optimizer] Cloud cover: avg 58% over 11 daytime forecast hours
-```
-
-#### Step 1: Compute avoidable energy per slot
-
-For each 15-min slot, compute the grid deficit that a battery discharge could
-displace:
-
-```
-net_production = solar_forecast - consumption_estimate   (watts)
-grid_deficit   = max(0, -net_production)                 (watts needing grid)
-avoidable_wh   = min(grid_deficit, max_discharge_w) × 0.25
-```
-
-Slots where solar covers consumption have `avoidable_wh = 0` — discharging
-there wastes stored energy since there's nothing to displace.
-
-#### Step 2: Filter candidates
-
-- **Discharge candidates**: only slots with `avoidable_wh > 0`, sorted by
-  `buy_price` descending (most expensive first)
-- **Charge candidates**: slots where `net_production ≤ 0` AND `solar_watts ≤ consumption_watts × 0.5`
-  (solar covering less than half of load), sorted by `buy_price` ascending (cheapest first).
-  Excluding slots where solar already covers ≥50% of consumption prevents grid charging during
-  the solar ramp-up window — those slots show up cheap in the price sort but grid-charging
-  there competes with free solar and creates scattered short charge windows.
-
-#### Step 3: Pair charge ↔ discharge
-
-Pair cheapest charge with most expensive discharge while:
-- Price spread exceeds efficiency loss: `discharge_price - charge_price > min_spread`
-- Battery capacity not exceeded
-
-Each pair's energy is capped to the discharge slot's `avoidable_wh` — the battery
-only charges what it will actually use. This means:
-
-- **Morning peak** (7–9, no solar) → high avoidable_wh → gets paired
-- **Sunny midday** (solar surplus) → zero avoidable_wh → skipped entirely
-- **Battery charges just enough** for the morning gap + any evening deficit
-
-#### Step 4: Solar surplus & sell
-
-After pairing, remaining idle slots with solar surplus get `charge_solar`.
-If the battery is full and grid sell is enabled, surplus becomes `sell`.
-
-#### Efficiency threshold
-
-A charge/discharge cycle only makes sense when the price spread exceeds the
-efficiency loss:
-
-```
-min_spread = buy_price × (1 / efficiency - 1)
-// At 90% efficiency and 0.50 SEK/kWh buy price: min_spread ≈ 0.056 SEK/kWh
-```
-
-Only schedule a cycle when `discharge_price - charge_price > min_spread`.
-
 ---
 
 ## Database
@@ -574,8 +448,7 @@ src/
 │   └── growatt-modbus.js     # Local Modbus TCP (MOD TL3-XH) — primary driver
 ├── consumption.js            # Consumption estimator: OLS model (day) + yesterday (night)
 ├── consumption-learner.js    # Fits OLS regression from consumption_readings
-├── optimizer.js              # Greedy v1: solar-aware charge/discharge pairing
-├── optimizer-lp.js           # LP v2: HiGHS-based global optimizer (shadow/comparison)
+├── optimizer-lp.js           # LP optimizer: HiGHS-based global optimizer (sole optimizer)
 ├── override.js               # Persistent manual override state
 └── battery-api.js            # Express endpoints: schedule, history, override, control
 ```
@@ -917,11 +790,11 @@ grid: {
 
 ### Integration with optimizer
 
-The peak shaving layer runs **before** the greedy pairing:
+The peak shaving layer integrates with the LP optimizer:
 1. Identify slots where forecast consumption exceeds peak_target
 2. Mark those slots as mandatory discharge (regardless of spot price)
 3. Reserve battery Wh for those slots
-4. Then run normal greedy pairing with remaining capacity
+4. LP optimizes remaining capacity across the full horizon
 
 ### What is implemented
 
@@ -1060,7 +933,6 @@ No structural change to the LP formulation — the LP just receives a higher `co
 
 ## Future Considerations
 
-- **Promote LP optimizer** — swap `optimizer.js` for `optimizer-lp.js` in `scheduler.js` once shadow validation is complete
 - **Multi-day optimization** — look ahead 48h when prices are volatile
 - **Grid capacity selling** — participate in frequency regulation markets
 - **EV charging pattern prediction** — auto-detect typical charge schedule from history (phase 2 of Feature C)

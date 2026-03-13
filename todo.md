@@ -6,31 +6,31 @@ Recommended order: A → B → C (dependencies increase; each feature is indepen
 
 ---
 
-## Feature A — Sell Energy in LP
+## Feature A — Sell Energy in LP ✅ Done 2026-03-13
 
 Pure LP formulation change. No DB schema changes. No new API endpoints.
 
-### A1 — Config
-- [ ] Add `grid.max_export_w: 4000` to `config.js` with comment (hardware export cap)
-- [ ] Update `config.js` comment for `sell_enabled` to reference the LP as the consumer
+### A1 — Config ✅
+- [x] Add `grid.max_export_w: 4000` to `config.js` with comment (hardware export cap)
+- [x] Update `config.js` comment for `sell_enabled` to reference the LP as the consumer
 
-### A2 — LP formulation (`src/optimizer-lp.js`)
-- [ ] Add `sell_t` variable (W) per slot to the LP variable set
-- [ ] Compute `maxSellW[t]`: `0` when `!grid.sell_enabled` or `sell_price[t] <= 0`; else `min(grid.max_export_w, bat.max_discharge_w)`
-- [ ] Add `sell_t` bounds to the LP string: `0 <= sell_t <= maxSellW[t]`
-- [ ] Add joint discharge constraint per slot: `d_t + sell_t <= max_discharge_w` (as a `Subject To` row)
-- [ ] Update SOC continuity constraint: add `− h·sell_t` term → `s_{t+1} = s_t + η·h·(cg + cs) − h·d − h·sell`
-- [ ] Update objective: add `−sell_price[t] × h/1000 × sell_t` term per slot
-- [ ] In solution parsing (step 6): extract `sell_t` primal value; if `> NOISE_W`, set `action = 'sell'`, `watts = sell_t`. Priority order: `charge_grid` > `discharge` > `sell` > `charge_solar`
-- [ ] Update savings summary (step 7): subtract sell revenue from `costWith` for `sell` slots
+### A2 — LP formulation (`src/optimizer-lp.js`) ✅
+- [x] Add `sell_t` variable (W) per slot to the LP variable set
+- [x] Compute `maxSellW[t]`: `0` when `!grid.sell_enabled` or `sell_price[t] <= 0`; else `min(grid.max_export_w, bat.max_discharge_w)`
+- [x] Add `sell_t` bounds to the LP string: `0 <= sell_t <= maxSellW[t]`
+- [x] Add joint discharge constraint per slot: `d_t + sell_t <= max_discharge_w` (as a `Subject To` row)
+- [x] Update SOC continuity constraint: add `− h·sell_t` term → `s_{t+1} = s_t + η·h·(cg + cs) − h·d − h·sell`
+- [x] Update objective: add `−sell_price[t] × h/1000 × sell_t` term per slot
+- [x] In solution parsing (step 6): extract `sell_t` primal value; if `> NOISE_W`, set `action = 'sell'`, `watts = sell_t`. Priority order: `charge_grid` > `discharge` > `sell` > `charge_solar`
+- [x] Update savings summary (step 7): subtract sell revenue from `costWith` for `sell` slots
 
-### A3 — Comparison tool (`run-compare-optimizers.js`)
-- [ ] Add `sell` slots to the "Grid charge comparison" summary block at the bottom (sold kWh line, like grid-charged and discharged)
+### A3 — Validation
+- [ ] Verify `sell` slots appear correctly in `data/battery-schedule.json` output (sold kWh in summary)
 
 ### A4 — Docs & validation
 - [ ] Update LP formulation table in `battery-optimizer.md` to include `sell_t` variable and updated SOC equation
 - [ ] Remove "Sell-to-grid not yet modeled" note from LP section
-- [ ] Run `node run-compare-optimizers.js` with `sell_enabled: true` in config to verify LP picks sell slots when profitable
+- [ ] Run `node run-battery-once.js` with `sell_enabled: true` in config to verify LP picks sell slots when profitable
 - [ ] Run with `sell_enabled: false` to verify no sell slots appear
 
 ---
@@ -99,12 +99,11 @@ Largest scope: DB migration, API, consumption pipeline, consumption estimator, L
 - [ ] Add EV schedule table schema to `battery-optimizer.md` (Database section)
 - [ ] Add EV API endpoints to the API section
 - [ ] Update the architecture diagram in `battery-optimizer.md` to show `ev_schedule → estimateConsumption → LP`
-- [ ] Declare a test EV session via `POST /battery/ev-schedule` and run `node run-compare-optimizers.js` — confirm LP grid-charges before the session window
+- [ ] Declare a test EV session via `POST /battery/ev-schedule` and run `node run-battery-once.js` — confirm LP grid-charges before the session window
 - [ ] Confirm `ev_detected` is set correctly on historical rows by inspecting `consumption_readings`
 
 ---
 
 ## Post-feature
 
-- [ ] Promote LP: when all three features are validated, swap `optimizer.js` → `optimizer-lp.js` in `scheduler.js` (add `await` to the `runOptimizer` call in `batteryPipeline`)
 - [ ] Update implementation status table in `battery-optimizer.md` to mark each feature Done

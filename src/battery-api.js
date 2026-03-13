@@ -14,6 +14,15 @@ export function setLpShadow(summary, schedule) {
   lpShadow = { summary, schedule, computed_at: new Date().toISOString() };
 }
 
+// In-memory sell shadow result — LP run with sell enabled even when config has it disabled.
+// Shows potential extra savings if sell-to-grid were activated.
+let sellShadow = null; // { summary, computed_at }
+
+/** Called by scheduler.js after sell shadow run (only when config.grid.sell_enabled = false). */
+export function setSellShadow(summary) {
+  sellShadow = { summary, computed_at: new Date().toISOString() };
+}
+
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
  */
@@ -103,6 +112,10 @@ router.get('/schedule', (req, res) => {
       computed_at: lpShadow.computed_at,
       summary:     lpShadow.summary,
       soc:         lpShadow.schedule.map(r => ({ slot: r.slot_ts, soc_start: r.soc_start, action: r.action, watts: r.watts })),
+    } : null,
+    sell_shadow: sellShadow ? {
+      computed_at: sellShadow.computed_at,
+      summary:     sellShadow.summary,
     } : null,
   });
 });
