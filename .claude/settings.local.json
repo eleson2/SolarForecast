@@ -39,7 +39,12 @@
       "Bash(sqlite3 \"G:/projects/SolarForecast/data/solar.db\" \"SELECT slot_ts, prod_forecast, prod_actual, cloud_cover FROM solar_readings WHERE slot_ts LIKE '2026-03-12%' ORDER BY slot_ts;\" 2>&1)",
       "Bash(powershell -Command \"Get-Content 'G:/projects/SolarForecast/logs/app.log' -Tail 200\" 2>&1)",
       "Bash(powershell -Command \"Get-Content 'G:/projects/SolarForecast/logs/app.log' | Select-String '2026-03-12' | Select-Object -First 80\" 2>&1)",
-      "Bash(powershell -Command \"Get-Content 'G:/projects/SolarForecast/logs/app.log' | Select-String '2026-03-12' | Select-String -Pattern 'ERROR|WARN|deviation|override|scalar|savings|fetch|learn|smooth'\" 2>&1)"
+      "Bash(powershell -Command \"Get-Content 'G:/projects/SolarForecast/logs/app.log' | Select-String '2026-03-12' | Select-String -Pattern 'ERROR|WARN|deviation|override|scalar|savings|fetch|learn|smooth'\" 2>&1)",
+      "Bash(sqlite3 data/solar.db \"SELECT MIN\\(snapshot_ts\\), MAX\\(snapshot_ts\\), COUNT\\(*\\) FROM energy_snapshots;\")",
+      "Bash(cmd /c 'schtasks /create /tn \"PM2 Solar Forecast\" /tr \"\\\\\"C:\\\\Users\\\\erlan\\\\AppData\\\\Roaming\\\\npm\\\\pm2.cmd\\\\\" resurrect\" /sc onstart /delay 0001:00 /ru \"erlan\" /it /f')",
+      "Bash(cmd //c \"schtasks /create /tn \\\\\"PM2 Solar Forecast\\\\\" /tr \\\\\"C:\\\\\\\\Users\\\\\\\\erlan\\\\\\\\AppData\\\\\\\\Roaming\\\\\\\\npm\\\\\\\\pm2.cmd resurrect\\\\\" /sc onstart /delay 0001:00 /ru erlan /it /f\")",
+      "Bash(cmd //c \"schtasks /create /tn \\\\\"PM2SolarForecast\\\\\" /tr \\\\\"C:\\\\\\\\Users\\\\\\\\erlan\\\\\\\\AppData\\\\\\\\Roaming\\\\\\\\npm\\\\\\\\pm2.cmd resurrect\\\\\" /sc onstart /delay 0001:00 /ru erlan /it /f\")",
+      "Bash(cmd //c \"schtasks /create /tn PM2SolarForecast /tr \\\\\"C:\\\\\\\\Users\\\\\\\\erlan\\\\\\\\AppData\\\\\\\\Roaming\\\\\\\\npm\\\\\\\\pm2.cmd\\\\\" /sc onstart /delay 0001:00 /ru erlan /it /f\")"
     ]
   }
 }

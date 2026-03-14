@@ -238,7 +238,7 @@ async function loadSolar() {
   solarData = data.readings;
 
   const now = new Date();
-  const nowTs = now.toISOString().slice(0, 13) + ':00';
+  const nowTs = now.toLocaleString('sv-SE', { timeZone: data.timezone }).replace(' ', 'T').slice(0, 13) + ':00';
 
   const future = solarData.filter(r => r.hour >= nowTs);
   const past    = solarData.filter(r => r.hour <  nowTs);

@@ -115,8 +115,27 @@ Run as a service and let it collect data for at least a few days:
 
 ```bash
 pm2 start ecosystem.config.cjs
-pm2 save && pm2 startup
+pm2 save
 ```
+
+**Windows only — auto-start on reboot (no logon required):**
+
+`pm2 startup` does not work on Windows. Instead, register a Windows Scheduled
+Task that runs `pm2 resurrect` at system boot using the provided script:
+
+1. Open PowerShell **as Administrator** (right-click → Run as Administrator)
+2. Run:
+   ```powershell
+   cd G:\projects\SolarForecast
+   .\register-startup.ps1
+   ```
+
+This creates a task that starts PM2 at system boot under your user account
+(`-LogonType S4U`), so the service comes up automatically after a reboot even
+if no one logs in.
+
+**After any change to the PM2 process list** (e.g. adding a new app), re-run
+`pm2 save` to update the saved state that `resurrect` restores.
 
 The system reads SOC and telemetry from the inverter but never writes anything.
 Check `logs/app.log` or `pm2 logs solar-forecast` to confirm pipelines are
@@ -286,6 +305,16 @@ battery cycles through a full day starting from a typical SOC (~50–60%).
 Either prices are flat (no arbitrage opportunity) or tomorrow's prices
 haven't published yet. Day-ahead prices typically publish around 13:00 CET.
 The `day_ahead_hour` config value triggers a replan when they arrive.
+
+### Service did not start after Windows reboot
+
+If the service is missing after a reboot, the scheduled task may not be
+registered. Run `register-startup.ps1` as Administrator (see Setup above),
+then reboot to confirm. Verify the task exists with:
+
+```powershell
+Get-ScheduledTask -TaskName PM2SolarForecast
+```
 
 ### PM2 process restarts in a loop
 
