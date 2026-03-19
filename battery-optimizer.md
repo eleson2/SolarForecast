@@ -140,7 +140,7 @@ import { runOptimizer } from './src/optimizer-lp.js';
 const { schedule, summary } = await runOptimizer(fromTs, toTs, consumptionEstimates, {
   startSoc: 61,           // live SOC % from inverter (optional)
   intradayScalar: 0.85,   // actual/forecast ratio for today (optional)
-  dry_run: true,          // skip DB write (optional, default false)
+  dryRun: true,           // skip DB write (optional, default false)
 });
 ```
 

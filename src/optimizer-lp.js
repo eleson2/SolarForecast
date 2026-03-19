@@ -96,7 +96,7 @@ function logWindows(label, actionSlots, priceFn) {
  * @param {Object} [options]
  * @param {number} [options.startSoc]    Live battery SOC % (0–100)
  * @param {number} [options.intradayScalar]
- * @param {boolean}[options.dry_run]     If true, skip writing to DB
+ * @param {boolean}[options.dryRun]      If true, skip writing to DB
  * @returns {Promise<{schedule: Array, summary: Object}>}
  */
 export async function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
@@ -418,7 +418,7 @@ End`;
     consumption_watts: s.consumption_watts,
   }));
 
-  if (!options.dry_run) {
+  if (!options.dryRun) {
     deleteScheduleForRange(fromTs, toTs);
     upsertScheduleBatch(dbRows);
   }

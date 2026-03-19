@@ -34,6 +34,19 @@ const PORT = process.env.PORT || 3000;
 // optimizer back to the pessimistic min_soc default.
 let lastKnownSoc = null;
 
+// Returns the current 15-minute slot window as local timestamp strings.
+function currentWindow() {
+  const now = new Date();
+  const currentSlot = new Date(now);
+  currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
+  const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    currentSlot,
+    fromTs: localTs(currentSlot, config.location.timezone),
+    toTs:   localTs(endSlot, config.location.timezone),
+  };
+}
+
 // --- Pipeline functions ---
 
 async function fetchPipeline() {
@@ -81,15 +94,8 @@ async function batteryPipeline() {
     log.info('battery', 'Starting battery optimizer pipeline');
     await fetchPrices();
 
-    const now = new Date();
-    const currentSlot = new Date(now);
-    currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
-    const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
-
+    const { currentSlot, fromTs, toTs } = currentWindow();
     const consumption = await estimateConsumption(currentSlot);
-
-    const fromTs = localTs(currentSlot, config.location.timezone);
-    const toTs = localTs(endSlot, config.location.timezone);
 
     // Read live SOC from inverter if available
     const options = {};
@@ -132,7 +138,7 @@ async function batteryPipeline() {
     // to show potential extra savings on the dashboard without affecting the schedule.
     if (!config.grid.sell_enabled) {
       const { summary: sellSum } = await runOptimizerLP(fromTs, toTs, consumption,
-        { ...options, dry_run: true, sellEnabled: true });
+        { ...options, dryRun: true, sellEnabled: true });
       if (sellSum) {
         setSellShadow(sellSum);
         const extra = (sellSum.estimated_savings - summary.estimated_savings).toFixed(2);
@@ -302,25 +308,10 @@ async function executePipeline() {
     }
 
     // Get schedule for now → +24h
-    const now = new Date();
-    const currentSlot = new Date(now);
-    currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
-    const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
-
-    const fromTs = localTs(currentSlot, config.location.timezone);
-    const toTs = localTs(endSlot, config.location.timezone);
-
+    const { fromTs, toTs } = currentWindow();
     const slots = getScheduleForRange(fromTs, toTs);
     if (!slots.length) {
       log.warn('execute', 'No schedule slots found — skipping execution');
-      return;
-    }
-
-    // Filter to future slots only
-    const nowTs = localTs(now, config.location.timezone);
-    const futureSlots = slots.filter(s => s.slot_ts >= nowTs);
-    if (!futureSlots.length) {
-      log.warn('execute', 'No future slots — skipping execution');
       return;
     }
 
@@ -337,7 +328,7 @@ async function executePipeline() {
       socDeviated = true;
     }
 
-    const result = await driver.applySchedule(futureSlots, cfg);
+    const result = await driver.applySchedule(slots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
     // Apply peak shaving limit for the current time slot (if enabled)
