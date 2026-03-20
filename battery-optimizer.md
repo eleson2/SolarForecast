@@ -42,6 +42,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
+| Sell to grid             | Done        | `sell_t` LP variable; `sell_price` in objective; `applySchedule` maps `sell` → `discharge_soc` floor; enabled via `grid.sell_enabled` |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
 | EV-aware scheduling      | Deferred    | EV charging managed externally via Home Assistant PV-surplus automation; this software will not implement it |
 | LP terminal SOC penalty   | Done        | Soft bonus `−avgBuyPrice×0.1×h/1000 × s_N` in LP objective discourages draining battery at end of 24h window, preventing reactive SOC deviation guard from triggering on next cycle |
@@ -90,19 +91,36 @@ The `intradayScalar` (actual/forecast ratio for completed daylight hours) is app
 **Objective** — minimize incremental grid cost:
 
 ```
-minimize  Σ buy_price[t] × cg_t × h/1000
-        − Σ buy_price[t] × d_t  × h/1000
+minimize  Σ buy_price[t]  × cg_t   × h/1000
+        − Σ buy_price[t]  × d_t    × h/1000
+        − Σ sell_price[t] × sell_t × h/1000   [when grid.sell_enabled]
 ```
 
-where `h = 0.25` (slot duration in hours). Charging costs money; discharging avoids buying at `buy_price`. Sell-to-grid revenue is not currently modeled in the objective (the `sell_price` is computed per slot but not used as an LP term — sell support is a planned extension).
+where `h = 0.25` (slot duration in hours). Charging costs money; discharging avoids buying at `buy_price`; selling earns `sell_price = spot × sell_price_factor − transfer_export_kwh`.
+
+**Variables per slot** `t = 0…N-1` (N = 96 for 24 h):
+
+| Variable | Meaning | Bounds |
+|----------|---------|--------|
+| `cg_t`   | Grid charge power (W)      | `[0, max_charge_w]` |
+| `d_t`    | Discharge power (W)        | `[0, min(max_discharge_w, max(0, consumption_t − solar_t))]` |
+| `cs_t`   | Solar charge power (W)     | `[0, min(max_charge_w, max(0, solar_t − consumption_t))]` |
+| `sell_t` | Battery→grid export (W)    | `[0, min(max_export_w, max_discharge_w)]` when `sell_enabled`; else 0 |
+| `s_t`    | Battery SOC (Wh)           | `[min_soc_wh, max_soc_wh]`, `s_0` fixed to `startSocWh` |
 
 **SOC continuity** (one equality constraint per slot — no temporal ordering bugs possible):
 
 ```
-s_{t+1} = s_t + η·h·(cg_t + cs_t) − h·d_t    ∀t
+s_{t+1} = s_t + η·h·(cg_t + cs_t) − h·d_t − h·sell_t    ∀t
 ```
 
 where `η = bat.efficiency` (round-trip charge efficiency). This single set of constraints replaces all of the greedy's Phase A/B/C heuristics and the correction loop.
+
+**Joint discharge limit** (when `sell_enabled`):
+
+```
+d_t + sell_t ≤ max_discharge_w    ∀t
+```
 
 Mutual exclusion (no simultaneous charge + discharge) is not needed explicitly — round-trip efficiency < 1 makes it always net-negative in the objective, so the solver never chooses both in the same slot.
 

@@ -59,7 +59,7 @@ export default {
         // Revenue per kWh: spot_price × sell_price_factor − transfer_export_kwh.
         // Only profitable when spot prices are high enough to overcome the efficiency loss
         // and transfer fee. Requires the inverter to support export (check grid operator rules).
-        sell_enabled: false,
+        sell_enabled: true,
         sell_price_factor: 0.80,
         // Maximum power the grid operator allows you to export (W).
         // Confirmed at 4.0 kW for this installation via Growatt app.

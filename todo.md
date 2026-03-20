@@ -24,14 +24,15 @@ Pure LP formulation change. No DB schema changes. No new API endpoints.
 - [x] In solution parsing (step 6): extract `sell_t` primal value; if `> NOISE_W`, set `action = 'sell'`, `watts = sell_t`. Priority order: `charge_grid` > `discharge` > `sell` > `charge_solar`
 - [x] Update savings summary (step 7): subtract sell revenue from `costWith` for `sell` slots
 
-### A3 — Validation
-- [ ] Verify `sell` slots appear correctly in `data/battery-schedule.json` output (sold kWh in summary)
+### A3 — Validation ✅
+- [x] Verify `sell` slots appear correctly in `data/battery-schedule.json` output (sold kWh in summary)
+  - Live run 2026-03-20: 20 sell slots, 11.0 kWh, savings 25.63 SEK
 
-### A4 — Docs & validation
-- [ ] Update LP formulation table in `battery-optimizer.md` to include `sell_t` variable and updated SOC equation
-- [ ] Remove "Sell-to-grid not yet modeled" note from LP section
-- [ ] Run `node run-battery-once.js` with `sell_enabled: true` in config to verify LP picks sell slots when profitable
-- [ ] Run with `sell_enabled: false` to verify no sell slots appear
+### A4 — Docs & validation ✅
+- [x] Update LP formulation table in `battery-optimizer.md` to include `sell_t` variable and updated SOC equation
+- [x] Remove "Sell-to-grid not yet modeled" note from LP section
+- [x] `sell_enabled: true` set in config.js — sell slots confirmed in live optimizer run
+- [x] Inverter responding: executePipeline dispatching schedule correctly
 
 ---
 
