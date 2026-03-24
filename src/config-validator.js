@@ -80,6 +80,14 @@ export function validateConfig(cfg) {
     }
   }
 
+  // --- ev (optional, validate if enabled) ---
+  if (cfg.ev?.enabled) {
+    finite(cfg.ev.charge_watts, 'ev.charge_watts');
+    need(cfg.ev.charge_watts > 0, 'ev.charge_watts must be positive');
+    finite(cfg.ev.price_threshold_kwh, 'ev.price_threshold_kwh');
+    need(cfg.ev.price_threshold_kwh >= 0, 'ev.price_threshold_kwh must be >= 0');
+  }
+
   // --- inverter (optional section, but validate if present) ---
   if (cfg.inverter?.brand) {
     need(KNOWN_INVERTER_BRANDS.includes(cfg.inverter.brand),

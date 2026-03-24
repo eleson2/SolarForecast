@@ -198,6 +198,19 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     console.log(`[optimizer-lp] Grid import cap: ${psConfig.default_kw} kW → max charge rate = cap − consumption`);
   }
 
+  // EV load: when the supplier charges the EV (cheap/grid-support prices), the EV draws
+  // directly from the grid — the house battery must NOT discharge to cover this load.
+  // ev_t is excluded from maxDis (discharge bound uses house-only consumption_watts).
+  // ev_t IS included in maxCgW so the peak-shaving cap accounts for total grid draw.
+  const evConfig = config.ev;
+  function evLoadW(slot) {
+    if (!evConfig?.enabled) return 0;
+    return slot.spot_price < evConfig.price_threshold_kwh ? evConfig.charge_watts : 0;
+  }
+  if (evConfig?.enabled) {
+    console.log(`[optimizer-lp] EV-aware: battery discharge bounded to house load only (EV draws from grid)`);
+  }
+
   // ── 4. Build LP problem string ───────────────────────────────────────────────
   //
   // Variable index convention (all watts):
@@ -281,7 +294,8 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     const maxSol = Math.min(bat.max_charge_w,
                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
     const psLimitW = peakShavingLimitW(slots[t].slot_ts);
-    const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts));
+    const evW      = evLoadW(slots[t]);
+    const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts - evW));
     const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
       ? Math.min(maxExportW, bat.max_discharge_w) : 0;
     boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);

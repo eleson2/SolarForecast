@@ -80,6 +80,19 @@ export default {
         // Example: 5000 covers a well-heated Swedish home; set to 0 to disable.
         max_house_w: 5000,
     },
+    ev: {
+        // Set enabled: true if an EV charges at this location via a supplier-controlled charger.
+        // When enabled: (1) consumption readings above max_house_w are stored as house-only
+        // (total − charge_watts) and tagged 'inverter_delta_ev'; (2) any price slot below
+        // price_threshold_kwh gets charge_watts added to the consumption estimate so the LP
+        // optimizer sees the correct total load during cheap/grid-support charging windows.
+        //
+        // NOTE: raise peak_shaving.schedule limit for cheap hours to preserve house-battery
+        // grid-charge headroom, e.g. { from: '00:00', to: '06:00', limit_kw: 12 }
+        enabled: true ,
+        charge_watts: 5300,           // 3-phase 8A 230V = 5520 W
+        price_threshold_kwh: 0.05,    // below this spot price, assume EV is charging
+    },
     inverter: {
         // Driver: 'growatt' = cloud API (MIN/MIX), 'growatt-modbus' = local Modbus TCP (MOD TL3-XH)
         brand: 'growatt-modbus',
@@ -108,12 +121,12 @@ export default {
     peak_shaving: {
         // Grid import power cap written to inverter holding register 800 (PeakShavingPower).
         // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Set enabled: true to activate.
-        enabled: false,
+        enabled: true,
         default_kw: 4.4,
         schedule: [
             // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
-            // { from: '00:00', to: '06:45', limit_kw: 10 },
-            // { from: '21:05', to: '23:59', limit_kw: 10 },
+            { from: '00:00', to: '06:45', limit_kw: 12 },
+            { from: '21:05', to: '23:59', limit_kw: 12 },
         ],
     },
     dashboard: {

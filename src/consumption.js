@@ -41,6 +41,7 @@ async function fetchTemperatures() {
  * 1. If source='yesterday' and yesterday's data exists: use it with temp correction
  * 2. Fallback: flat_watts from config
  */
+
 export async function estimateConsumption(windowStart = null) {
   const now = new Date();
 

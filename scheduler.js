@@ -240,8 +240,20 @@ async function consumptionPipeline() {
         : snapNow.pv_today_kwh;
 
       // kWh over 1 hour = average kW = average W × 1000
-      const consumption_w = deltaLoad * 1000;
-      upsertConsumption(prevHourTs, consumption_w, outdoorTemp, 'inverter_delta');
+      const totalW = deltaLoad * 1000;
+      let consumption_w = totalW;
+      let consumptionSource = 'inverter_delta';
+
+      if (config.ev?.enabled && config.ev.charge_watts > 0) {
+        const maxHouseW = config.consumption?.max_house_w ?? Infinity;
+        if (totalW > maxHouseW) {
+          consumption_w = Math.max(100, totalW - config.ev.charge_watts);
+          consumptionSource = 'inverter_delta_ev';
+          log.info('consumption',
+            `${prevHourTs}: EV detected (${Math.round(totalW)}W > ${maxHouseW}W) — storing house-only ${Math.round(consumption_w)}W`);
+        }
+      }
+      upsertConsumption(prevHourTs, consumption_w, outdoorTemp, consumptionSource);
 
       // prod_actual stored in kW (matches prod_forecast units)
       updateActual(prevHourTs, deltaPv);

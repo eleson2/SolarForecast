@@ -44,10 +44,10 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
 | Sell to grid             | Done        | `sell_t` LP variable; `sell_price` in objective; `applySchedule` maps `sell` → `discharge_soc` floor; enabled via `grid.sell_enabled` |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
-| EV-aware scheduling      | Deferred    | EV charging managed externally via Home Assistant PV-surplus automation; this software will not implement it |
+| EV-aware scheduling      | Done        | `config.ev`: `enabled`, `charge_watts`, `price_threshold_kwh`. `consumptionPipeline` stores house-only `consumption_w` (strips EV load, tags `'inverter_delta_ev'`). LP optimizer: `maxDis` uses house-only consumption so battery never discharges to cover EV; `maxCgW` subtracts `evLoadW(slot)` from the peak-shaving cap so grid-charge headroom correctly accounts for EV draw. |
 | LP terminal SOC penalty   | Done        | Soft bonus `−avgBuyPrice×0.1×h/1000 × s_N` in LP objective discourages draining battery at end of 24h window, preventing reactive SOC deviation guard from triggering on next cycle |
 | LP noise threshold        | Done        | `NOISE_W` reduced from 50W to 10W — previously suppressed up to 12.5 Wh/slot of valid operations |
-| Consumption EV filter     | Done        | `consumption.js` Path 2: if yesterday's hourly reading > `config.consumption.max_house_w`, falls back to `flat_watts` — prevents EV charging spikes from inflating consumption estimates |
+| Consumption EV filter     | Done        | `consumptionPipeline`: if `ev.enabled` and total load > `max_house_w`, stores house-only portion (`total − ev.charge_watts`, min 100 W) tagged `'inverter_delta_ev'`. `estimateConsumption` Path 2: if yesterday's reading > `max_house_w` (legacy guard, still active when `ev.enabled=false`), falls back to `flat_watts`. |
 
 ---
 
@@ -311,8 +311,9 @@ export default {
         modbus_retry_delay_ms: 4000,  // delay between retries in ms
     },
     ev: {
-        enabled: false,              // v2 — EV-aware scheduling
-        // see "EV-Aware Scheduling" section below
+        enabled: false,
+        charge_watts: 5520,          // 3-phase 8A 230V
+        price_threshold_kwh: 0.05,   // below this spot price, assume EV is charging
     }
 }
 ```
@@ -748,15 +749,58 @@ Configurable via `config.battery.soc_deviation_threshold` (default: 10 %).
 
 ## EV Charging
 
-EV charging is handled externally via a **Home Assistant automation** that starts
-the charger when there is a PV surplus. This software does not schedule or control
-EV charging.
+EV charging is controlled externally by the electricity supplier, which activates
+the charger in two scenarios: (1) spot price below a threshold (cheap grid energy),
+(2) grid-support events (excess supply — user is reimbursed for consumption). Both
+result in the EV consuming power that flows through the home meter.
 
-The main interaction point is the `consumption.max_house_w` threshold: readings
-above this value are excluded from the daytime consumption regression, preventing
-EV charging sessions from inflating the slope and corrupting future estimates.
+### Config
 
-No further EV integration is planned in this software.
+```js
+ev: {
+    enabled: false,
+    charge_watts: 5520,         // 3-phase 8A 230V = 5520 W
+    price_threshold_kwh: 0.05,  // below this spot price, assume EV is charging
+}
+```
+
+### Historical data cleaning (`consumptionPipeline`)
+
+When `ev.enabled` and `total_load_w > consumption.max_house_w`, the pipeline stores
+the house-only portion (`total − ev.charge_watts`, min 100 W) in `consumption_w` and
+tags `source = 'inverter_delta_ev'`. This keeps the consumption model clean without
+a DB schema change.
+
+### LP optimizer — EV-aware bounds (`optimizer-lp.js`)
+
+The house battery must **not** discharge to cover EV load — EV draws directly from
+the grid. This is enforced via two separate LP bounds:
+
+- **`maxDis`** uses `house_consumption_watts` only (i.e. `consumption_watts` from
+  `estimateConsumption`, which is already house-only). Battery discharge is bounded
+  to `max(0, house − solar)` — it cannot be planned to supply the EV.
+- **`maxCgW`** uses `psLimit − house_consumption − ev_load_w`. The `ev_load_w` is
+  computed by `evLoadW(slot)` in the optimizer: returns `ev.charge_watts` when
+  `slot.spot_price < ev.price_threshold_kwh`, else 0. This ensures the peak-shaving
+  cap correctly accounts for the EV's grid draw, leaving the right headroom for
+  house-battery charging.
+
+### Peak shaving interaction
+
+During EV charging, total draw is `house_load + ev.charge_watts ≈ 6-7 kW`. The
+default peak-shaving limit (4.4 kW) would set `max_cg_w = 0`, blocking house-battery
+grid charging during the same cheap slots. Raise `peak_shaving.schedule` for those
+hours:
+
+```js
+peak_shaving: {
+    enabled: true,
+    default_kw: 4.4,
+    schedule: [
+        { from: '00:00', to: '06:00', limit_kw: 12 },  // EV + house + battery
+    ],
+}
+```
 
 ---
 
@@ -894,50 +938,12 @@ The only config change needed is setting `enabled: true`. The `default_kw: 4.4` 
 
 ### Feature C — EV Charging Recognition
 
-**Goal:** detect when the EV is charging (from existing telemetry), persist that flag, allow the user to declare future EV charging windows via API, and feed expected EV consumption into the LP so it plans grid charging in advance of EV sessions.
+**Status: Done.** See the "EV Charging" section for the implemented design.
 
-**Detection (already partially done):**
-
-`consumptionPipeline` already reads `consumption_w` from the inverter. Any hour where `consumption_w > config.consumption.max_house_w` is almost certainly EV charging. Add `ev_detected BOOLEAN` to `consumption_readings` and set it in the pipeline.
-
-**DB additions:**
-
-```sql
--- Migrate: add column to existing table
-ALTER TABLE consumption_readings ADD COLUMN ev_detected INTEGER DEFAULT 0;
-
--- New table: user-declared future EV charging windows
-CREATE TABLE ev_schedule (
-  id          INTEGER PRIMARY KEY,
-  start_ts    DATETIME NOT NULL,   -- "YYYY-MM-DDTHH:MM"
-  end_ts      DATETIME NOT NULL,
-  power_w     REAL NOT NULL,       -- expected EV charge power (W)
-  note        TEXT                 -- optional label
-);
-```
-
-**API additions:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET`  | `/battery/ev-schedule` | List upcoming declared EV sessions |
-| `POST` | `/battery/ev-schedule` | Declare a session: `{ start_ts, end_ts, power_w }` |
-| `DELETE` | `/battery/ev-schedule/:id` | Cancel a session |
-
-**LP integration:**
-
-`estimateConsumption()` is called before the optimizer runs. It returns `[{ hour_ts, consumption_w }]`. Modify it to overlay EV schedule rows on top of baseline consumption:
-
-```
-If hour_ts overlaps an ev_schedule row:
-    consumption_w = house_estimate_w + ev_schedule.power_w
-```
-
-No structural change to the LP formulation — the LP just receives a higher `consumption_watts` value for EV hours. The discharge upper bound `d_t ≤ consumption_t − solar_t` grows during EV slots, and the optimizer may choose to grid-charge beforehand to cover the extra load cheaply.
-
-**Consumption model:** `estimateConsumption` already excludes hours above `max_house_w` from the regression. The `ev_detected` flag makes this explicit and enables future per-hour EV statistics.
-
-**Phase 2 (deferred):** auto-prediction of future EV charging from historical patterns (day-of-week, typical charge start hour). Not part of this roadmap.
+Detection is price-based (no DB schema change, no API needed): the supplier activates
+EV charging at low/negative spot prices, both of which are already in `price_readings`.
+`consumptionPipeline` strips the EV load from historical readings; `estimateConsumption`
+overlays expected EV load on future cheap-price slots before passing to the LP optimizer.
 
 ---
 
@@ -945,7 +951,7 @@ No structural change to the LP formulation — the LP just receives a higher `co
 
 1. **Feature A (Sell)** — pure LP formula change, no DB/API work, most self-contained
 2. **Feature B (peak shaving schedule)** — mostly already implemented; enable in config + startup write + midnight-window fix
-3. **Feature C (EV)** — largest scope: DB migration, API endpoints, consumption pipeline, LP input change
+3. **Feature C (EV)** — Done
 
 ---
 
