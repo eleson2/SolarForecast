@@ -82,16 +82,15 @@ export default {
     },
     ev: {
         // Set enabled: true if an EV charges at this location via a supplier-controlled charger.
-        // When enabled: (1) consumption readings above max_house_w are stored as house-only
-        // (total − charge_watts) and tagged 'inverter_delta_ev'; (2) any price slot below
-        // price_threshold_kwh gets charge_watts added to the consumption estimate so the LP
-        // optimizer sees the correct total load during cheap/grid-support charging windows.
+        // When enabled, consumption readings above max_house_w are stored as house-only
+        // (total − charge_watts) and tagged 'inverter_delta_ev', keeping the consumption
+        // model clean. Battery discharge is bounded to house load only — the EV draws from
+        // the grid directly, enforced by the peak_shaving hardware register (800).
         //
-        // NOTE: raise peak_shaving.schedule limit for cheap hours to preserve house-battery
-        // grid-charge headroom, e.g. { from: '00:00', to: '06:00', limit_kw: 12 }
-        enabled: true ,
-        charge_watts: 5300,           // 3-phase 8A 230V = 5520 W
-        price_threshold_kwh: 0.05,    // below this spot price, assume EV is charging
+        // NOTE: raise peak_shaving.schedule limit during EV charging hours so the hardware
+        // allows enough grid import for EV + house, e.g. { from: '00:00', to: '06:45', limit_kw: 12 }
+        enabled: true,
+        charge_watts: 5300,           // nameplate EV charger draw (W)
     },
     inverter: {
         // Driver: 'growatt' = cloud API (MIN/MIX), 'growatt-modbus' = local Modbus TCP (MOD TL3-XH)
