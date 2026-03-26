@@ -142,3 +142,12 @@ SKIP
 [~] Dockerfile / docker-compose
     Not applicable. Project needs local Modbus TCP access to 192.168.1.180.
     Docker --network=host defeats isolation. PM2 is the right tool here.
+
+
+
+  1. Check logs/pm2-error.log for crash stack traces — stabilizing the process eliminates the Modbus      
+  cascade
+  2. Test node run-battery-once.js with dry_run: true after a clean restart to verify register 3310 writes
+   are accepted again
+  3. Delete the 0W consumption record for 11:00
+  4. Consider raising the intra-day scalar cap from 2.0× to ~3.0× for days with dramatic cloud clearing   

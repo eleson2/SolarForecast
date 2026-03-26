@@ -29,6 +29,16 @@ export default {
         // prod_forecast, so including them would inflate the matrix and partially undo
         // the suppression on subsequent clear days.
         cloud_matrix_exclude_pct: 80,
+        // Intra-day solar scalar cap: maximum factor by which today's actuals can scale
+        // the remaining solar forecast during the battery re-optimization.
+        // 2.0 = safe default; raise to 3.0+ on sites with frequent dramatic cloud clearing
+        // where Open-Meteo under-predicts. The scalar applies to all remaining hours, so
+        // setting it too high risks over-valuing solar on days where clearing was temporary.
+        intraday_scalar_max: 3.0,
+        // If today's actual/forecast ratio exceeds this, trigger a fresh Open-Meteo
+        // fetch before re-optimizing. Captures mid-day NWP updates on days where the
+        // morning forecast was badly wrong (e.g., cloud clearing not in the model).
+        intraday_refetch_threshold: 1.8,
     },
     forecast: {
         horizon_hours: 24,
@@ -118,10 +128,11 @@ export default {
         // device_sn: '',
     },
     peak_shaving: {
-        // Grid import power cap written to inverter holding register 800 (PeakShavingPower).
-        // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Set enabled: true to activate.
+        // Grid import power cap written to inverter holding register 3307 (PeakShavingPower import).
+        // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Register 3308 is the export limit.
+        // Only written when the value changes (schedule boundary or default_kw edit).
         enabled: true,
-        default_kw: 4.4,
+        default_kw: 4.3,
         schedule: [
             // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
             { from: '00:00', to: '06:45', limit_kw: 12 },

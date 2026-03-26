@@ -34,11 +34,12 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS correction_matrix_smooth (
-    day_of_year     INTEGER,
+    month           INTEGER,
+    day_of_month    INTEGER,
     hour_of_day     INTEGER,
     correction_avg  REAL,
     sample_count    INTEGER,
-    PRIMARY KEY (day_of_year, hour_of_day)
+    PRIMARY KEY (month, day_of_month, hour_of_day)
   );
 
   CREATE TABLE IF NOT EXISTS price_readings (
@@ -107,6 +108,24 @@ db.exec(`
     last_updated  DATETIME
   )
 `);
+
+// --- Migrate correction_matrix_smooth from day_of_year key to month×day×hour ---
+// The smooth table is a derived cache — safe to drop and let the smoother rebuild it.
+
+const smoothCols = db.prepare("PRAGMA table_info(correction_matrix_smooth)").all();
+if (smoothCols.length > 0 && smoothCols.some(c => c.name === 'day_of_year')) {
+  db.exec('DROP TABLE correction_matrix_smooth');
+  db.exec(`
+    CREATE TABLE correction_matrix_smooth (
+      month           INTEGER,
+      day_of_month    INTEGER,
+      hour_of_day     INTEGER,
+      correction_avg  REAL,
+      sample_count    INTEGER,
+      PRIMARY KEY (month, day_of_month, hour_of_day)
+    )
+  `);
+}
 
 // --- Migrate correction_matrix from old month×hour schema to month×day×hour ---
 
@@ -250,6 +269,21 @@ const stmts = {
       AND irr_forecast  >= ?
   `),
 
+  getIntradaySolarRatioByBand: db.prepare(`
+    SELECT
+      MIN((CAST(cloud_cover AS INTEGER) / 25) * 25, 75) AS band,
+      SUM(prod_actual)                                   AS actual_sum,
+      SUM(prod_forecast)                                 AS forecast_sum,
+      COUNT(*)                                           AS sample_count
+    FROM solar_readings
+    WHERE substr(hour_ts, 1, 10) = ?
+      AND prod_actual   IS NOT NULL
+      AND prod_forecast  > 0
+      AND irr_forecast  >= ?
+      AND cloud_cover   IS NOT NULL
+    GROUP BY MIN((CAST(cloud_cover AS INTEGER) / 25) * 25, 75)
+  `),
+
   getCorrectionCell: db.prepare(`
     SELECT correction_avg, sample_count, total_weight, max_prod
     FROM correction_matrix
@@ -269,20 +303,20 @@ const stmts = {
   `),
 
   upsertSmooth: db.prepare(`
-    INSERT INTO correction_matrix_smooth (day_of_year, hour_of_day, correction_avg, sample_count)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(day_of_year, hour_of_day) DO UPDATE
+    INSERT INTO correction_matrix_smooth (month, day_of_month, hour_of_day, correction_avg, sample_count)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(month, day_of_month, hour_of_day) DO UPDATE
     SET correction_avg = excluded.correction_avg, sample_count = excluded.sample_count
   `),
 
   getSmoothCell: db.prepare(`
     SELECT correction_avg, sample_count
     FROM correction_matrix_smooth
-    WHERE day_of_year = ? AND hour_of_day = ?
+    WHERE month = ? AND day_of_month = ? AND hour_of_day = ?
   `),
 
   getReadingsForSmoothing: db.prepare(`
-    SELECT hour_ts, correction, confidence, prod_actual
+    SELECT hour_ts, correction, confidence, prod_actual, cloud_cover
     FROM solar_readings
     WHERE correction IS NOT NULL AND confidence IS NOT NULL
   `),
@@ -344,6 +378,15 @@ export function getIntradaySolarRatio(dateStr, minIrr = 10, minSamples = 2) {
   return row.actual_sum / row.forecast_sum;
 }
 
+/**
+ * Returns actual/forecast ratio per cloud-cover band for completed hours today.
+ * Bands: 0=0–24%, 25=25–49%, 50=50–74%, 75=75–100%.
+ * Each row: { band, actual_sum, forecast_sum, sample_count }.
+ */
+export function getIntradaySolarRatioByBand(dateStr, minIrr = 10) {
+  return stmts.getIntradaySolarRatioByBand.all(dateStr, minIrr);
+}
+
 export function getCorrectionCell(month, dayOfMonth, hourOfDay) {
   return stmts.getCorrectionCell.get(month, dayOfMonth, hourOfDay);
 }
@@ -356,12 +399,12 @@ export function getAllCorrections() {
   return stmts.getAllCorrections.all();
 }
 
-export function upsertSmooth(dayOfYear, hourOfDay, correctionAvg, sampleCount) {
-  return stmts.upsertSmooth.run(dayOfYear, hourOfDay, correctionAvg, sampleCount);
+export function upsertSmooth(month, dayOfMonth, hourOfDay, correctionAvg, sampleCount) {
+  return stmts.upsertSmooth.run(month, dayOfMonth, hourOfDay, correctionAvg, sampleCount);
 }
 
-export function getSmoothCell(dayOfYear, hourOfDay) {
-  return stmts.getSmoothCell.get(dayOfYear, hourOfDay);
+export function getSmoothCell(month, dayOfMonth, hourOfDay) {
+  return stmts.getSmoothCell.get(month, dayOfMonth, hourOfDay);
 }
 
 export function getReadingsForSmoothing() {

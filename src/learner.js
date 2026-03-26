@@ -39,6 +39,13 @@ export function runLearner() {
 
   let count = 0;
   let skippedCloud = 0;
+  // Maximum correction we'll store. A ratio above this means the irradiance forecast
+  // was so badly wrong that the sample would corrupt the matrix (e.g., Open-Meteo
+  // predicted 10 W/m² but actual was clear-sky — the panel can't really produce 20×
+  // the base model). The cap is `peak_kw / base_at_1Wm2` = 1000, but we use a much
+  // lower practical ceiling so one bad forecast day can't dominate the matrix.
+  const MAX_CORRECTION = config.learning.max_correction_sample ?? 4.0;
+
   for (const row of rows) {
     const correction = row.prod_actual / row.prod_forecast;
     const weight = sampleWeight(row.irr_forecast);
@@ -51,6 +58,15 @@ export function runLearner() {
     // would inflate the matrix for that (month, day, hour) cell.
     if (row.cloud_cover != null && row.cloud_cover >= cloudExcludeThreshold) {
       skippedCloud++;
+      continue;
+    }
+
+    // Skip matrix update if the correction is implausibly large — this happens when
+    // the irradiance forecast is much lower than reality (e.g. Open-Meteo predicted
+    // heavy cloud but it was clear). Keeping such samples would inflate the matrix
+    // for that cell and cause over-forecasting on future sunny days.
+    if (correction > MAX_CORRECTION) {
+      console.log(`[learner] Skipping outlier correction ${correction.toFixed(2)} at ${row.hour_ts} (irr=${row.irr_forecast} W/m², actual=${row.prod_actual?.toFixed(3)} kW)`);
       continue;
     }
 

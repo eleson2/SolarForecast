@@ -1,1 +1,0 @@
-node test-modbus.js  > test-modbus-result.txt

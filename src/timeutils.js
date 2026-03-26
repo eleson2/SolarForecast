@@ -24,14 +24,32 @@ export function parseTs(ts) {
   return { year, month, day, hour };
 }
 
+const CUM_DAYS = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+const MONTH_DAYS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 /**
  * Convert month (1–12) + day (1–31) to day-of-year (1–365).
- * Non-leap year only — acceptable for correction matrix indexing.
  */
 export function dayOfYear(month, day) {
-  const cumDays = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-  return cumDays[month] + day;
+  return CUM_DAYS[month] + day;
 }
+
+/**
+ * Convert day-of-year (1–365) back to { month, day }.
+ */
+export function doyToMonthDay(doy) {
+  for (let m = 12; m >= 1; m--) {
+    if (doy > CUM_DAYS[m]) return { month: m, day: doy - CUM_DAYS[m] };
+  }
+}
+
+/** All valid (month, day) pairs for a non-leap year, in calendar order. */
+export const CALENDAR_DATES = (() => {
+  const dates = [];
+  for (let m = 1; m <= 12; m++)
+    for (let d = 1; d <= MONTH_DAYS[m]; d++) dates.push({ month: m, day: d });
+  return dates;
+})();
 
 /**
  * Shortest distance in days between two calendar dates, wrapping at year boundary.

@@ -1,4 +1,7 @@
 import cron from 'node-cron';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { validateConfig } from './src/config-validator.js';
 import { fetchWeather } from './src/fetcher.js';
 import { parseWeatherData } from './src/parser.js';
@@ -10,7 +13,7 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
-import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio } from './src/db.js';
+import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio, getIntradaySolarRatioByBand } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride } from './src/override.js';
 import { setLpShadow, setSellShadow } from './src/battery-api.js';
@@ -117,13 +120,40 @@ async function batteryPipeline() {
     }
 
     // Intra-day solar correction: if today's actuals diverge from the forecast,
-    // scale remaining forecast hours so the optimizer works with realistic solar numbers.
+    // (1) trigger a re-fetch so future hours use the latest NWP data, then
+    // (2) apply per-cloud-cover-band scalars so each remaining hour is corrected
+    //     using completed hours that experienced similar sky conditions.
     const todayDate = fromTs.slice(0, 10);
     const rawRatio = getIntradaySolarRatio(todayDate);
+    const scalarMax = config.learning.intraday_scalar_max ?? 3.0;
+    const refetchThreshold = config.learning.intraday_refetch_threshold ?? 1.8;
+
+    if (rawRatio !== null && rawRatio > refetchThreshold) {
+      log.info('battery', `Intra-day ratio ${rawRatio.toFixed(2)}× > ${refetchThreshold} — triggering re-fetch for fresh NWP data`);
+      await fetchPipeline();
+    }
+
     if (rawRatio !== null) {
-      const clamped = Math.max(0.1, Math.min(2.0, rawRatio));
-      options.intradayScalar = clamped;
-      log.info('battery', `Intra-day solar scalar: ${clamped.toFixed(2)} (actual/forecast=${(rawRatio * 100).toFixed(0)}%)`);
+      const bandRows = getIntradaySolarRatioByBand(todayDate);
+      const cloudBandScalars = new Map();
+      for (const row of bandRows) {
+        if (row.sample_count >= 1 && row.forecast_sum > 0) {
+          cloudBandScalars.set(row.band, Math.max(0.1, Math.min(scalarMax, row.actual_sum / row.forecast_sum)));
+        }
+      }
+
+      if (cloudBandScalars.size > 0) {
+        options.cloudBandScalars = cloudBandScalars;
+        // Global scalar acts as fallback for hours with no cloud_cover data
+        options.intradayScalar = Math.max(0.1, Math.min(scalarMax, rawRatio));
+        const bandSummary = [...cloudBandScalars.entries()]
+          .map(([b, s]) => `${b}%:${s.toFixed(2)}×`)
+          .join(' ');
+        log.info('battery', `Intra-day scalars by cloud band: ${bandSummary} (global fallback: ${options.intradayScalar.toFixed(2)}×)`);
+      } else {
+        options.intradayScalar = Math.max(0.1, Math.min(scalarMax, rawRatio));
+        log.info('battery', `Intra-day solar scalar: ${options.intradayScalar.toFixed(2)}× (actual/forecast=${(rawRatio * 100).toFixed(0)}%, no band data)`);
+      }
     }
 
     const { summary, schedule } = await runOptimizerLP(fromTs, toTs, consumption, options);
@@ -294,6 +324,8 @@ function getPeakShavingLimit(psConfig, slotTs) {
 
 // --- Inverter execution pipeline ---
 
+let lastPeakShavingKw = null; // track last written value to avoid redundant writes
+
 async function executePipeline() {
   const driver = getDriver();
   if (!driver) return; // no inverter configured — skip silently
@@ -343,11 +375,16 @@ async function executePipeline() {
     const result = await driver.applySchedule(slots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
-    // Apply peak shaving limit for the current time slot (if enabled)
+    // Apply peak shaving limit only when it changes (avoids writing every 15 min)
     const psLimit = getPeakShavingLimit(config.peak_shaving, fromTs);
-    if (psLimit !== null && typeof driver.setPeakShavingTarget === 'function') {
-      await driver.setPeakShavingTarget(psLimit, cfg);
-      log.info('execute', `Peak shaving limit set: ${psLimit} kW`);
+    if (psLimit !== null && psLimit !== lastPeakShavingKw && typeof driver.setPeakShavingTarget === 'function') {
+      try {
+        await driver.setPeakShavingTarget(psLimit, cfg);
+        lastPeakShavingKw = psLimit;
+        log.info('execute', `Peak shaving limit set: ${psLimit} kW`);
+      } catch (psErr) {
+        log.warn('execute', `Peak shaving write failed (non-fatal): ${psErr.message}`);
+      }
     }
 
     recordPipelineRun('execute');
@@ -416,6 +453,20 @@ cron.schedule('*/15 * * * *', async () => {
     if (deviated) await batteryPipeline();
   }
 });
+
+// --- Config file watcher ---
+// Exit cleanly on config change so PM2 auto-restarts with the new settings.
+// Debounce guards against editors that write the file twice in quick succession.
+const configPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'config.js');
+let configReloadTimer = null;
+const configWatcher = fs.watch(configPath, () => {
+  if (configReloadTimer) return;
+  configReloadTimer = setTimeout(() => {
+    log.info('scheduler', 'config.js changed — restarting to apply new settings');
+    process.exit(0);
+  }, 1000);
+});
+process.on('exit', () => configWatcher.close());
 
 // --- Start server ---
 

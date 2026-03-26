@@ -367,10 +367,11 @@ async function loadSchedule() {
   // Schedule chart
   const invCfg = inverter_config ?? { discharge_soc: 20, charge_soc: 90, peak_shaving: { enabled: false, default_kw: 4.5, schedule: [] } };
 
-  const sLabels   = schedule.map(r => fmtHour(r.slot));
-  const sSocData  = schedule.map(r => r.soc_start ?? null);
-  const sMinSoc   = schedule.map(r => computeMinReservedSOC(r, invCfg));
+  const sLabels    = schedule.map(r => fmtHour(r.slot));
+  const sSocData   = schedule.map(r => r.soc_start ?? null);
+  const sMinSoc    = schedule.map(r => computeMinReservedSOC(r, invCfg));
   const sPriceData = schedule.map(r => r.price_kwh ?? null);
+  const sSolarData = schedule.map(r => r.solar_watts ? +(r.solar_watts / 1000).toFixed(2) : 0);
 
   const sBarBg    = schedule.map(r => {
     const base = ACTION_BG[r.action] ?? ACTION_BG.idle;
@@ -432,6 +433,18 @@ async function loadSchedule() {
           yAxisID: 'yPrice',
           order: 3,
         },
+        {
+          type: 'line',
+          label: 'Solar kW',
+          data: sSolarData,
+          borderColor: 'rgba(160,220,80,0.9)',
+          backgroundColor: 'rgba(160,220,80,0.12)',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          fill: true,
+          yAxisID: 'ySolar',
+          order: 2,
+        },
       ],
     },
     options: {
@@ -447,6 +460,7 @@ async function loadSchedule() {
             label: ctx => {
               if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
               if (ctx.dataset.yAxisID === 'yPrice') return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
+              if (ctx.dataset.yAxisID === 'ySolar') return `Solar: ${ctx.raw?.toFixed(2)} kW`;
               return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             },
             afterBody: (items) => {
@@ -454,7 +468,6 @@ async function loadSchedule() {
               const r = schedule[i];
               if (!r) return [];
               const lines = [`SOC: ${r.soc_start ?? '—'}% → ${r.soc_end ?? '—'}%`];
-              if (r.solar_watts) lines.push(`Solar: ${r.solar_watts} W`);
               if (r.consumption_watts) lines.push(`Load: ${r.consumption_watts} W`);
               return lines;
             },
@@ -487,6 +500,9 @@ async function loadSchedule() {
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
+        ySolar: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+                  title: { display: true, text: 'Solar kW', color: 'rgba(160,220,80,0.9)' },
+                  ticks: { color: 'rgba(160,220,80,0.7)' } },
       },
     },
     plugins: [{ id: 'nowLine', afterDraw(chart) {

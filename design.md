@@ -182,24 +182,35 @@ This decouples the weather source — switching from Open-Meteo to another provi
 (or to a file-based guesstimate) only requires changes in `parser.js`.
 
 ### 3. Model
-`model.js` produces `prod_forecast` for each hour using a two-layer correction:
+`model.js` produces `prod_forecast` for each hour using a three-step pipeline:
+
+**Step 1 — GHI → POA conversion** (`ghiToPoa`):
+Open-Meteo returns `shortwave_radiation` as GHI (horizontal global irradiance). The model
+converts this to Plane-of-Array (POA) irradiance for the configured panel tilt and azimuth
+using proper solar geometry (Spencer declination + equation of time, atan2 azimuth) and
+the Erbs beam/diffuse decomposition, then Hay–Davies transposition:
 
 ```
-prod_forecast = peak_kw × (irr_forecast / 1000) × matrix_correction × recency_bias
+POA = DNI × cos(AOI) + DHI × (1+cos(tilt))/2 + GHI × albedo × (1−cos(tilt))/2
 ```
 
-**Layer 1 — matrix correction** (`matrix_correction`): the blended empirical/geometry
-correction from the learned matrix. Adapts over months as new seasonal data arrives.
+For a 38° south-facing panel in Sweden at spring noon, POA ≈ 1.5–1.6 × GHI. Using GHI
+directly caused the correction matrix to inflate to 6–7× before this was fixed.
+
+**Step 2 — matrix correction** (`matrix_correction`): blended empirical correction from
+the smoothed matrix. Prefers `correction_matrix_smooth` (Gaussian-averaged, ±7 days);
+falls back to raw `correction_matrix` when smooth is unavailable. Adapts over months.
+Initial fallback is 1.0 (physics baseline — correct since POA already encodes geometry).
 Stored in `solar_readings.correction_applied` at forecast time.
 
-**Layer 2 — recency bias** (`recency_bias`): a global scalar computed fresh each run
-from the irradiance-weighted mean of `actual / forecast` over the last 14 days. Captures
-short-term deviations (dirty panel, new obstruction) within days rather than months.
-Falls back to 1.0 when fewer than 10 irradiance-weight units of data are available.
-Clamped to [0.5, 2.0] — values outside that range log a warning (likely a metering error).
+**Step 3 — recency bias** (`recency_bias`): global scalar from the irradiance-weighted
+mean of `actual / forecast` over the last 14 days. Captures short-term deviations (dirty
+panel, new obstruction). Falls back to 1.0 with insufficient data. Clamped to [0.5, 2.0].
 
-Before enough matrix data exists, falls back to a geometry-based estimate derived from
-tilt and azimuth.
+Final result is capped at `peak_kw` — no correction or bias can exceed rated panel capacity:
+```
+prod_forecast = min(peak_kw, peak_kw × (POA/1000) × matrix_correction × recency_bias × cloudFactor)
+```
 
 ### 4. Learn
 `learner.js` runs hourly. When `prod_actual` is available for a past hour, it computes:
@@ -211,10 +222,13 @@ correction = prod_actual / prod_forecast
 This is written to `solar_readings` and used to update the `correction_matrix`.
 
 ### 5. Smooth
-`smoother.js` periodically updates the correction matrix using weighted averages.
-Low-irradiance hours contribute less (noisy signal). Observations are smoothed across
-±7 days of day-of-year using a Gaussian kernel (σ=3 days) to reduce noise from
-individual cloudy days. Year-wrap (365→1) is handled.
+`smoother.js` periodically updates `correction_matrix_smooth` using Gaussian-weighted
+averages across ±7 days of day-of-year (σ=3 days). Excludes the same samples the learner
+rejects: high-cloud readings (≥ `cloud_matrix_exclude_pct`) and outlier corrections
+(> `max_correction_sample`). Year-wrap (365→1) is handled.
+
+The model prefers smooth corrections over raw per-cell values — smooth corrections
+generalise across neighbouring days and are more stable with sparse data.
 
 ---
 

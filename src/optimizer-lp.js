@@ -124,19 +124,31 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
 
   const intradayScalar = (options.intradayScalar != null && isFinite(options.intradayScalar))
     ? options.intradayScalar : 1.0;
-  if (intradayScalar !== 1.0) {
-    console.log(`[optimizer-lp] Intra-day solar scalar: ${intradayScalar.toFixed(2)}`);
-  }
+  const cloudBandScalars = options.cloudBandScalars instanceof Map ? options.cloudBandScalars : null;
 
   // Minimum solar power to be treated as real generation — suppresses pre-dawn
   // forecast artefacts that would otherwise cause spurious SOC increases.
   const MIN_SOLAR_W = 50;
 
+  const peakWatts = config.panel.peak_kw * 1000;
   const solarMap = new Map(
-    interpolateTo15Min(solarRows.map(r => ({
-      hour_ts: r.hour_ts,
-      value: r.prod_forecast != null ? r.prod_forecast * 1000 * intradayScalar : 0,
-    }))).map(s => [s.slot_ts, Math.max(0, s.value) < MIN_SOLAR_W ? 0 : s.value])
+    interpolateTo15Min(solarRows.map(r => {
+      // Per-band scalar: match this hour's cloud cover to the band from completed
+      // hours today that experienced the same sky conditions. Falls back to the
+      // global ratio for hours without cloud_cover data.
+      let scalar = intradayScalar;
+      if (cloudBandScalars && r.cloud_cover != null) {
+        const band = Math.min(Math.floor(r.cloud_cover / 25) * 25, 75);
+        scalar = cloudBandScalars.get(band) ?? intradayScalar;
+      }
+      return {
+        hour_ts: r.hour_ts,
+        value: r.prod_forecast != null ? r.prod_forecast * 1000 * scalar : 0,
+      };
+    })).map(s => {
+      const w = Math.max(0, s.value) < MIN_SOLAR_W ? 0 : s.value;
+      return [s.slot_ts, Math.min(peakWatts, w)];
+    })
   );
 
   const consumptionMap = new Map(
