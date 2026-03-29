@@ -1,3 +1,7 @@
+import os from 'os';
+// Lower process priority so the scheduler doesn't lag the desktop
+try { os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
+
 import cron from 'node-cron';
 import fs from 'fs';
 import path from 'path';
@@ -464,7 +468,7 @@ const configWatcher = fs.watch(configPath, () => {
   configReloadTimer = setTimeout(() => {
     log.info('scheduler', 'config.js changed — restarting to apply new settings');
     process.exit(0);
-  }, 1000);
+  }, 30000);
 });
 process.on('exit', () => configWatcher.close());
 

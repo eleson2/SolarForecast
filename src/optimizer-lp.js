@@ -8,11 +8,13 @@
  *     d_t    — discharge to house (W)   [bounded by grid deficit]
  *     cs_t   — solar charge power (W)   [free energy, zero cost]
  *     sell_t — battery→grid export (W)  [only when grid.sell_enabled]
+ *     clip_t — solar clipped by export cap (W) [slack; only in surplus slots when max_export_w set]
  *     s_t    — battery SOC (Wh)         [s_0 … s_N, N+1 values]
  *
  *   Objective:  minimize Σ buy_price[t]  * cg_t   * h/1000
  *                       − Σ buy_price[t]  * d_t    * h/1000
  *                       − Σ sell_price[t] * sell_t * h/1000   [when sell_enabled]
+ *                       + Σ sell_price[t] * clip_t * h/1000   [lost revenue; drives pre-emptive discharge]
  *     (h = 0.25 h per slot; /1000 converts W→kW)
  *
  *   Constraints:
@@ -24,6 +26,7 @@
  *     Solar bound:     0 ≤ cs_t ≤ min(max_charge_w, solar_surplus_w[t])
  *     Sell bound:      0 ≤ sell_t ≤ min(max_export_w, max_discharge_w)  [when sell_enabled]
  *     Joint discharge: d_t + sell_t ≤ max_discharge_w                   [when sell_enabled]
+ *     Export cap:      −cs_t + sell_t − clip_t ≤ max_export_w − surplus_t  [surplus slots only]
  *
  * Mutual exclusion (charge + discharge same slot) is not needed explicitly —
  * efficiency < 1 makes round-tripping always net-negative, so the solver
@@ -217,6 +220,14 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     console.log(`[optimizer-lp] EV-aware: battery discharge bounded to house load only (EV draws from grid)`);
   }
 
+  // Export cap (W) — limits total grid injection per slot (solar overflow + battery sell).
+  // Used to enforce peak-power tariff compliance in both directions.
+  // Infinite when not configured (no constraint added).
+  const exportCapW = grid.max_export_w ?? Infinity;
+  if (isFinite(exportCapW)) {
+    console.log(`[optimizer-lp] Export cap: ${exportCapW / 1000} kW — will plan pre-emptive discharge to avoid solar clipping`);
+  }
+
   // ── 4. Build LP problem string ───────────────────────────────────────────────
   //
   // Variable index convention (all watts):
@@ -258,6 +269,19 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
       }
     }
   }
+  // Clip penalty: each watt of clipped solar costs its sell value (lost export revenue).
+  // Only meaningful when sell is enabled and the price is positive — otherwise there's no
+  // revenue incentive and the LP can't avoid clipping anyway (sell_t = 0).
+  if (effectiveSellEnabled && isFinite(exportCapW)) {
+    for (let t = 0; t < N; t++) {
+      const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
+      if (surplusW > 0 && slots[t].sell_price > 0) {
+        const coeff = (slots[t].sell_price * h / 1000).toFixed(8);
+        objLines.push(`+${coeff} clip_${t}`);
+      }
+    }
+  }
+
   // Soft penalty for low terminal SOC (subtract bonus for s_N — minimize means solver prefers high s_N)
   objLines.push(`-${endSocBonusCoeff} s_${N}`);
 
@@ -280,6 +304,21 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   if (effectiveSellEnabled) {
     for (let t = 0; t < N; t++) {
       constrLines.push(`  jd_${t}: d_${t} + sell_${t} <= ${bat.max_discharge_w.toFixed(4)}`);
+    }
+  }
+  // Export cap: net grid injection (solar overflow + battery sell) must not exceed export limit.
+  // solar_surplus − cs_t + sell_t − clip_t ≤ max_export_w
+  // → -cs_t + sell_t - clip_t ≤ max_export_w - solar_surplus_t
+  // clip_t is a slack that absorbs unavoidable overflow (e.g. battery already full).
+  // The penalty in the objective ensures the LP minimises clipping wherever possible.
+  if (isFinite(exportCapW)) {
+    for (let t = 0; t < N; t++) {
+      const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
+      if (surplusW > 0) {
+        const rhs = (exportCapW - surplusW).toFixed(4);
+        const sellTerm = effectiveSellEnabled ? ` + sell_${t}` : '';
+        constrLines.push(`  ec_${t}: - cs_${t}${sellTerm} - clip_${t} <= ${rhs}`);
+      }
     }
   }
 
@@ -308,6 +347,13 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     boundLines.push(`  0 <= cs_${t} <= ${maxSol.toFixed(4)}`);
     if (effectiveSellEnabled) {
       boundLines.push(`  0 <= sell_${t} <= ${maxSellW.toFixed(4)}`);
+    }
+    // clip_t: slack for solar that exceeds the export cap — bounded by the surplus available
+    if (isFinite(exportCapW)) {
+      const surplusW = Math.max(0, slots[t].solar_watts - slots[t].consumption_watts);
+      if (surplusW > 0) {
+        boundLines.push(`  0 <= clip_${t} <= ${surplusW.toFixed(4)}`);
+      }
     }
   }
 
@@ -338,6 +384,22 @@ End`;
   }
 
   console.log(`[optimizer-lp] Solved: ${result.Status}, objective = ${result.ObjectiveValue.toFixed(4)} ${currency}`);
+
+  // Log predicted solar clipping so the user can see when pre-emptive discharge is helping
+  if (isFinite(exportCapW)) {
+    let totalClipWh = 0;
+    for (let t = 0; t < N; t++) {
+      const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
+      if (surplusW > 0) {
+        totalClipWh += Math.max(0, result.Columns[`clip_${t}`]?.Primal ?? 0) * h / 1000;
+      }
+    }
+    if (totalClipWh > 0.01) {
+      console.warn(`[optimizer-lp] Predicted solar clipping: ${totalClipWh.toFixed(2)} kWh (battery cannot fully absorb surplus)`);
+    } else {
+      console.log(`[optimizer-lp] Solar clipping: none predicted`);
+    }
+  }
 
   // ── 6. Parse solution → slot actions ─────────────────────────────────────────
 

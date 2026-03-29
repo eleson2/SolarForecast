@@ -34,6 +34,13 @@ type: project
 - Each restart triggers fresh cron job registration and may cause mid-cycle state loss.
 - The 11:59 restart caused the 10:00 consumption_readings slot to be missing.
 
+## Issue: Recency bias clamp persistent (observed 2026-03-25 through 2026-03-28)
+- **What:** `[model] Recency bias clamped X → 2 (check for metering error)` fires on every learnPipeline run (hourly). Raw values range 3.0–3.5, clamped to 2.
+- **Count:** 35 events on 2026-03-28, 32 on 2026-03-27. Persistent since at least 2026-03-25.
+- **What it means:** The intra-day actual/forecast ratio is consistently 3× or higher. The model caps the scalar at 2 to avoid over-correction. Today's overall ratio was 1.93× (actual 20.10 kWh vs forecast 10.40 kWh).
+- **Root cause:** The correction matrix forecasts are severely low compared to actuals on overcast days — Open-Meteo irradiance dramatically underestimates production under diffuse/overcast sky. The correction matrix has not yet accumulated enough March data to learn the scaling.
+- **Status:** Expected to improve as correction matrix accumulates more March observations (currently ~10 days of March data, 1 sample per cell).
+
 ## Issue: Consumption model R²=0.08 (persistent)
 - Every hourly learnPipeline run emits "Low R²=0.08 — temperature explains little of the variance; check for EV charging or other large variable loads"
 - This is a known property of this household: EV charging creates large unpredictable load spikes. 8 readings above 5000W are being excluded.

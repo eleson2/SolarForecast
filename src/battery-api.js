@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import config from '../config.js';
-import { getScheduleForRange, getSnapshotsForRange } from './db.js';
+import { getScheduleForRange, getSnapshotsForRange, getSolarReadingsForRange } from './db.js';
 import { getDriver, getDriverConfig } from './inverter-dispatcher.js';
 import { setOverride, clearOverride, getOverride } from './override.js';
 
@@ -131,6 +131,13 @@ router.get('/history', (req, res) => {
 
   const schedule  = getScheduleForRange(fromTs, toTs);
   const snapshots = getSnapshotsForRange(fromTs, toTs);
+  const solar     = getSolarReadingsForRange(fromTs, toTs);
+
+  // Build hour → actual watts lookup (prod_actual is stored in kW)
+  const solarActualByHour = {};
+  for (const r of solar) {
+    if (r.prod_actual != null) solarActualByHour[r.hour_ts] = Math.round(r.prod_actual * 1000);
+  }
 
   res.json({
     generated_at: now.toISOString(),
@@ -150,6 +157,7 @@ router.get('/history', (req, res) => {
       watts:              r.watts,
       price_kwh:          r.price_kwh,
       solar_watts:        r.solar_watts,
+      solar_actual_w:     solarActualByHour[r.slot_ts.slice(0, 13) + ':00'] ?? null,
       consumption_watts:  r.consumption_watts,
       soc_start:          r.soc_start,
       soc_end:            r.soc_end,

@@ -84,7 +84,21 @@
       "Bash(tail -5 grep \"setPeakShav\\\\|PeakShavingPower\" G:/projects/SolarForecast/logs/pm2-out.log)",
       "Bash(node -e \":*)",
       "Bash(sqlite3:*)",
-      "Bash(1 grep:*)"
+      "Bash(1 grep:*)",
+      "WebFetch(domain:data.nordpoolgroup.com)",
+      "WebFetch(domain:www.energidataservice.dk)",
+      "WebFetch(domain:www.nordpoolgroup.com)",
+      "WebFetch(domain:data-api.nordpoolgroup.com)",
+      "WebFetch(domain:mgrey.se)",
+      "WebFetch(domain:spot.56k.guru)",
+      "WebFetch(domain:transparency.entsoe.eu)",
+      "WebFetch(domain:dashboard.elering.ee)",
+      "WebFetch(domain:www.freepublicapis.com)",
+      "WebFetch(domain:www.openhab.org)",
+      "WebFetch(domain:api.energidataservice.dk)",
+      "WebFetch(domain:www.domoticz.com)",
+      "WebFetch(domain:forum.domoticz.com)",
+      "WebFetch(domain:gridprice.eu)"
     ]
   }
 }

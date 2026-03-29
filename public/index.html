@@ -569,12 +569,14 @@ async function loadHistory() {
   const invCfg = inverter_config ?? { discharge_soc: 20, charge_soc: 90, peak_shaving: { enabled: false, default_kw: 4.5, schedule: [] } };
   const psCfg  = invCfg.peak_shaving;
 
-  const labels        = schedule.map(r => fmtTime(r.slot));
-  const socData       = schedule.map(r => r.soc_start ?? null);
-  const priceData     = schedule.map(r => r.price_kwh ?? null);
-  const barBg         = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
-  const minSocData    = schedule.map(r => computeMinReservedSOC(r, invCfg));
-  const psData        = schedule.map(r => getPeakShavingLimit(r.slot, psCfg));
+  const labels           = schedule.map(r => fmtTime(r.slot));
+  const socData          = schedule.map(r => r.soc_start ?? null);
+  const priceData        = schedule.map(r => r.price_kwh ?? null);
+  const barBg            = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
+  const minSocData       = schedule.map(r => computeMinReservedSOC(r, invCfg));
+  const psData           = schedule.map(r => getPeakShavingLimit(r.slot, psCfg));
+  const solarForecastData = schedule.map(r => r.solar_watts ? +(r.solar_watts / 1000).toFixed(2) : 0);
+  const solarActualData   = schedule.map(r => r.solar_actual_w != null ? +(r.solar_actual_w / 1000).toFixed(2) : null);
 
   // Action counts for note
   const counts = {};
@@ -646,6 +648,30 @@ async function loadHistory() {
           yAxisID: 'yPower',
           order: 3,
         },
+        {
+          type: 'line',
+          label: 'Solar Forecast kW',
+          data: solarForecastData,
+          borderColor: 'rgba(160,220,80,0.5)',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          yAxisID: 'yPower',
+          order: 3,
+        },
+        {
+          type: 'line',
+          label: 'Solar Actual kW',
+          data: solarActualData,
+          borderColor: 'rgba(160,220,80,1)',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          borderWidth: 2,
+          yAxisID: 'yPower',
+          order: 2,
+          spanGaps: false,
+        },
       ],
     },
     options: {
@@ -662,6 +688,8 @@ async function loadHistory() {
               if (ctx.datasetIndex === 0) return `Action: ${schedule[ctx.dataIndex]?.action}`;
               if (ctx.datasetIndex === 3) return `Price: ${ctx.raw?.toFixed(3)} SEK/kWh`;
               if (ctx.datasetIndex === 4) return `PeakShaving: ${ctx.raw?.toFixed(1)} kW${psCfg.enabled ? '' : ' (disabled)'}`;
+              if (ctx.datasetIndex === 5) return `Solar Forecast: ${ctx.raw?.toFixed(2)} kW`;
+              if (ctx.datasetIndex === 6) return ctx.raw != null ? `Solar Actual: ${ctx.raw?.toFixed(2)} kW` : null;
               return `${ctx.dataset.label}: ${ctx.raw?.toFixed(1)}%`;
             }
           }

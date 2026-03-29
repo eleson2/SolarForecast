@@ -146,9 +146,11 @@ export default {
         auth_pass: '',      // set a password to enable
     },
     price: {
-        source: 'elprisetjust',     // Must match a filename in src/prices/ (without .js extension)
+        // Price sources tried in order — first one to return data wins.
+        // Each entry must match a filename in src/prices/ (without .js extension).
+        sources: ['elprisetjust', 'nordpool'],
         region: 'SE3',              // Provider-specific region code
-        currency: 'SEK',            // Display currency
+        currency: 'SEK',            // Display currency (must be SEK when using energidataservice)
         day_ahead_hour: 13,         // Hour (UTC) when tomorrow's prices publish
     },
 };

@@ -78,16 +78,48 @@ function ghiToPoa(ghiWm2, month, dom, hour) {
 }
 
 /**
+ * Adaptive ceiling for the recency bias scalar.
+ *
+ * When the correction matrix is sparse the bias scalar needs more headroom
+ * to compensate for irradiance-model errors the matrix hasn't learned yet.
+ * As the matrix fills up, the cap tightens so the bias only catches
+ * short-term anomalies (dirty panels, new shading).
+ *
+ * Cap interpolates linearly from 3.5× (0 samples) → 1.8× (≥20 samples),
+ * sampled across active solar hours for the given month.
+ */
+function adaptiveClampMax(month) {
+  const solarHours = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+  const counts = solarHours.map(h => {
+    const cell = getCorrectionCell(month, 15, h); // mid-month as representative day
+    return cell?.sample_count ?? 0;
+  });
+  const avgSamples = counts.reduce((s, c) => s + c, 0) / counts.length;
+
+  const capHigh = 3.5;
+  const capLow  = 1.8;
+  const cap = avgSamples >= 20
+    ? capLow
+    : capHigh - (avgSamples / 20) * (capHigh - capLow);
+
+  return { cap, avgSamples };
+}
+
+/**
  * Compute the global recency bias scalar b.
  *
  * b = irradiance-weighted mean of (prod_actual / prod_forecast) over the last
  * window_days days. It captures short-term systematic deviations (dirty panel,
  * new obstruction) that the slow-moving correction matrix hasn't absorbed yet.
  *
+ * The ceiling is adaptive: it allows higher corrections when the matrix is
+ * sparse (early in the year / new installation) and tightens as the matrix
+ * accumulates enough samples to self-correct.
+ *
  * Returns 1.0 if there is insufficient high-quality data in the window.
  */
 function computeRecencyBias() {
-  const { window_days, min_samples, clamp_min, clamp_max } = config.learning.recency_bias;
+  const { window_days, min_samples, clamp_min } = config.learning.recency_bias;
 
   // Window start as a timestamp string. UTC-based; ~1–2 h error is irrelevant
   // for a 14-day window filtered against local-time strings in the DB.
@@ -113,12 +145,14 @@ function computeRecencyBias() {
   }
 
   const raw = weightedSum / totalWeight;
-  const clamped = Math.max(clamp_min, Math.min(clamp_max, raw));
+  const currentMonth = new Date().getMonth() + 1;
+  const { cap: clampMax, avgSamples } = adaptiveClampMax(currentMonth);
+  const clamped = Math.max(clamp_min, Math.min(clampMax, raw));
 
   if (clamped !== raw) {
-    console.warn(`[model] Recency bias clamped ${raw.toFixed(3)} → ${clamped} (check for metering error)`);
+    console.warn(`[model] Recency bias clamped ${raw.toFixed(3)} → ${clamped.toFixed(3)} (adaptive cap ${clampMax.toFixed(2)}× at avg ${avgSamples.toFixed(1)} samples/cell)`);
   } else {
-    console.log(`[model] Recency bias: ${raw.toFixed(3)} (${rows.length} samples, weight ${totalWeight.toFixed(1)})`);
+    console.log(`[model] Recency bias: ${raw.toFixed(3)} (${rows.length} samples, weight ${totalWeight.toFixed(1)}, cap ${clampMax.toFixed(2)}×)`);
   }
 
   return clamped;

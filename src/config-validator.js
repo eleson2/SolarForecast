@@ -4,7 +4,7 @@
  * Call this before any pipeline or cron setup so bad config fails fast.
  */
 
-const KNOWN_PRICE_SOURCES = ['elprisetjust', 'awattar'];
+const KNOWN_PRICE_SOURCES = ['elprisetjust', 'awattar', 'nordpool', 'energidataservice'];
 const KNOWN_INVERTER_BRANDS = ['growatt', 'growatt-modbus'];
 
 function need(condition, message) {
@@ -59,8 +59,15 @@ export function validateConfig(cfg) {
 
   // --- price ---
   need(cfg.price, 'price section is missing');
-  need(KNOWN_PRICE_SOURCES.includes(cfg.price.source),
-    `price.source "${cfg.price.source}" is unknown — valid values: ${KNOWN_PRICE_SOURCES.join(', ')}`);
+  const priceSources = Array.isArray(cfg.price.sources)
+    ? cfg.price.sources
+    : (cfg.price.source ? [cfg.price.source] : null); // backward compat
+  need(priceSources && priceSources.length > 0,
+    'price.sources must be a non-empty array of source names');
+  for (const s of priceSources) {
+    need(KNOWN_PRICE_SOURCES.includes(s),
+      `price.sources entry "${s}" is unknown — valid values: ${KNOWN_PRICE_SOURCES.join(', ')}`);
+  }
   need(typeof cfg.price.region === 'string' && cfg.price.region.length > 0,
     'price.region must be a non-empty string');
 

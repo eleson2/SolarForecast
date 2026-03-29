@@ -20,34 +20,47 @@ function localDate(date) {
 }
 
 /**
- * Fetch prices for a single date via the configured provider.
- * Returns array of { slot_ts, spot_price, region } or null.
+ * Fetch prices for a single date, trying configured sources in order.
+ * Returns array of { slot_ts, spot_price, region } or null if all sources fail.
  */
 async function fetchPricesForDate(date) {
-  const source = config.price.source;
-  let provider;
-  try {
-    provider = await import(`./prices/${source}.js`);
-  } catch {
-    throw new Error(
-      `Unknown price source '${source}': no file found at src/prices/${source}.js`
-    );
-  }
+  const sources = Array.isArray(config.price.sources)
+    ? config.price.sources
+    : [config.price.source]; // backward compat with legacy single-source config
 
   const dateStr = localDate(date);
-  const result = await provider.fetchPricesForDate(dateStr, config.price.region);
-  if (!result) return null;
 
-  // Archive raw JSON
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-  const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
-  const filename = `prices_${source}_${stamp}_${time}_${dateStr}.json`;
-  fs.writeFileSync(path.join(RAW_DIR, filename), JSON.stringify(result.raw, null, 2));
-  console.log(`[price-fetcher] Saved raw price data to ${filename}`);
+  for (const source of sources) {
+    let provider;
+    try {
+      provider = await import(`./prices/${source}.js`);
+    } catch {
+      throw new Error(`Unknown price source '${source}': no file found at src/prices/${source}.js`);
+    }
 
-  return result.prices;
+    const result = await provider.fetchPricesForDate(dateStr, config.price.region);
+    if (!result) {
+      const hasNext = sources.indexOf(source) < sources.length - 1;
+      console.log(`[price-fetcher] ${source}: no prices for ${dateStr}${hasNext ? ', trying next source' : ''}`);
+      continue;
+    }
+
+    // Archive raw JSON
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
+    const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
+    const filename = `prices_${source}_${stamp}_${time}_${dateStr}.json`;
+    fs.writeFileSync(path.join(RAW_DIR, filename), JSON.stringify(result.raw, null, 2));
+    console.log(`[price-fetcher] Saved raw price data to ${filename}`);
+    if (source !== sources[0]) {
+      console.log(`[price-fetcher] Used fallback source: ${source}`);
+    }
+
+    return result.prices;
+  }
+
+  return null; // all sources exhausted
 }
 
 /**

@@ -37,6 +37,8 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Soft transient reset     | Done        | `executePipeline` skips `resetToDefault` for ETIMEDOUT/ECONNREFUSED — leaves inverter in last-written state |
 | Charge/discharge window logging | Done | `logWindows()` groups consecutive slots into time windows with kWh and avg price |
 | Cloud-cover suppression  | Done        | `model.js` applies `cloudFactor = 1 - (cloud_cover/100) * cloud_suppression_max` to every forecast hour; `cloud_suppression_max` (default 0.65) is in `config.learning`; at 100% cloud the forecast is scaled to ~35% of the irradiance-only value |
+| Solar overflow / export cap | Done       | `optimizer-lp.js`: new `clip_t` slack variable + `ec_t` constraint per surplus slot. LP plans pre-emptive `sell` before high-solar hours to keep battery below full; unavoidable clipping is logged as a warning. No new config needed — uses `config.grid.max_export_w`. |
+| Adaptive recency bias cap | Done        | `model.js` `adaptiveClampMax(month)` replaces the fixed `clamp_max` in `config.learning.recency_bias`. Cap interpolates 3.5× (0 matrix samples/cell) → 1.8× (≥20 samples/cell) for the current month's active solar hours. Allows aggressive correction early in the year when the matrix is sparse; auto-tightens as data accumulates. Fixed `clamp_max` in config is no longer used (only `clamp_min` is read). |
 | Intra-day solar scalar   | Done        | `batteryPipeline` calls `getIntradaySolarRatio(today)` — ratio of actual-to-forecast for completed daylight hours — and passes it to the optimizer as `options.intradayScalar`; optimizer multiplies remaining-day solar forecast values by this scalar before planning |
 | Temporal feasibility correction | Done | After Phase B, a correction loop simulates forward SOC and detects discharge slots that would be cancelled (executed < 50% of planned). It removes the cheapest earlier discharge to free SOC for the higher-value later slot, repeating up to 20 times. Prevents low-margin early discharges (e.g. 0.70 €/kWh at 16:00) from depleting the battery before the price peak (e.g. 1.11 €/kWh at 19:00). |
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
@@ -529,7 +531,16 @@ Requirements:
   expand each hour into 4×15-min slots with the same price.
 - Include raw API response in `raw` for archiving.
 
-Then set `config.price.source` to the filename (without `.js`). No other changes needed — `src/price-fetcher.js` loads providers dynamically by convention.
+Then add the filename (without `.js`) to `config.price.sources`. Sources are tried in order — the first to return data wins. No other changes needed — `src/price-fetcher.js` loads providers dynamically by convention.
+
+### Built-in providers
+
+| File | Source | Auth | Resolution | Notes |
+|------|--------|------|------------|-------|
+| `elprisetjust.js` | elprisetjustnu.se | None | 15-min native | Default primary; hobby project, no SLA |
+| `nordpool.js` | dataportal-api.nordpoolgroup.com | None | Hourly → 4×15-min | Unofficial endpoint; no ToS guarantee |
+| `energidataservice.js` | api.energidataservice.dk (Energinet/Danish TSO) | None | Hourly → 4×15-min | **Not suitable as primary/fallback for SE3** — Elspotprices dataset stopped updating Oct 2025; kept for DK regions if resumed |
+| `awattar.js` | api.awattar.de/at | None | Hourly → 4×15-min | DE/AT markets only |
 
 ---
 
@@ -952,6 +963,126 @@ overlays expected EV load on future cheap-price slots before passing to the LP o
 1. **Feature A (Sell)** — pure LP formula change, no DB/API work, most self-contained
 2. **Feature B (peak shaving schedule)** — mostly already implemented; enable in config + startup write + midnight-window fix
 3. **Feature C (EV)** — Done
+
+---
+
+## Solar Overflow / Export Cap (Summer Design)
+
+### Problem
+
+In summer, peak PV production (up to 7 kW) can exceed house consumption (0.3–0.8 kW) + grid export cap (4.0 kW). When the battery is full or near-full, the inverter clips PV output to enforce the export cap, wasting potentially 1–3 kWh/day.
+
+**Example:** solar 6 kW, house 0.5 kW, battery full → export attempt 5.5 kW → inverter clips to 4.0 kW → **1.5 kW wasted**.
+
+The current LP optimizer has no awareness of the export cap. It fills the battery to `max_soc` and then has no plan for what happens to the remaining solar.
+
+The export cap applies to both import and export (same peak power cost), so the constraint is symmetric.
+
+---
+
+### Why Pre-Emptive Discharge Helps
+
+If the battery is partially discharged *before* peak solar hours, it has headroom to absorb the surplus that would otherwise be clipped:
+
+```
+Battery at 60% (not 95%) at 10:00
+→ Solar 6 kW, house 0.5 kW, battery absorbs 5.5 kW at max_charge_w
+→ Grid export: 0 kW  ← no clipping, no peak violation
+```
+
+The LP already knows how to plan discharge/sell before expensive periods. The missing piece is a constraint that makes the optimizer *see* the export limit as a reason to discharge earlier.
+
+---
+
+### LP Solution: Export Constraint + Clip Slack Variable
+
+**New variable per slot:** `clip_t ≥ 0` (W) — solar energy that cannot be absorbed and exceeds the export cap (unavoidably wasted).
+
+**New constraint** (surplus slots only, where `solar_t > consumption_t`):
+
+```
+solar_surplus_t − cs_t + sell_t − clip_t  ≤  max_export_w
+```
+
+Where:
+- `solar_surplus_t = solar_t − consumption_t` (W, known parameter)
+- `cs_t` = solar→battery charge (existing decision variable)
+- `sell_t` = battery→grid discharge (existing decision variable)
+- `clip_t ≥ 0` = slack — clipped solar (new variable)
+
+**Objective penalty for clipping:**
+
+```
++ sell_price[t] × h/1000 × clip_t   (added to minimise objective)
+```
+
+Clipping is penalised at the sell price of that slot — the LP loses exactly the revenue it would have earned by selling that solar. This makes pre-emptive discharge economically attractive whenever the avoided clipping revenue exceeds the cost of discharging earlier at a lower price.
+
+**Why a slack variable (not a hard constraint)?**
+
+A hard `≤ max_export_w` constraint becomes infeasible when the battery is unavoidably full (e.g., already at `max_soc` with no prior discharge opportunity). The slack `clip_t` keeps the LP always feasible while still incentivising the optimizer to avoid clipping wherever possible.
+
+---
+
+### LP Constraint Mechanics
+
+**Case 1 — Battery has room (`cs_t > 0` possible):**
+The constraint forces `cs_t − sell_t ≥ solar_surplus_t − max_export_w`.
+Battery absorbs the overflow. `clip_t = 0`. No revenue lost.
+
+**Case 2 — Battery full (`cs_t = 0` due to SOC bound), avoidable:**
+Before this slot, the LP plans `sell_t` actions to lower SOC, creating room. At the high-solar slot, `cs_t > 0` because the battery has headroom again.
+
+**Case 3 — Unavoidable (battery full all day, no prior discharge possible):**
+`clip_t > 0`. LP accepts the loss but minimises it. This handles edge cases (e.g., consecutive high-solar days with no overnight discharge opportunity).
+
+---
+
+### Interaction with Existing Variables
+
+| Variable | Behaviour change |
+|----------|-----------------|
+| `cs_t` | Upper bound unchanged. Now also implicitly constrained by export cap when `sell_t = 0` |
+| `sell_t` | Now economically motivated to create headroom before high-solar hours, not just by price arbitrage |
+| `d_t` | Unchanged — discharge to house not relevant in solar surplus slots (`maxDis = 0` when solar > consumption) |
+| `s_t` | Will now stay below `max_soc_wh` before predicted overflow hours instead of filling completely |
+
+No new config parameters needed — `config.grid.max_export_w` (already `4000`) is used.
+
+---
+
+### Energy Balance Check
+
+SOC continuity constraint is **unchanged** — `clip_t` is solar that never reaches the battery or grid; it's clipped at the inverter before any energy exchange. Only `cs_t` and `sell_t` flow through the battery.
+
+---
+
+### Known Limitations
+
+**1. CC/CV charge taper (BMS behaviour near full charge)**
+The LP assumes `max_charge_w = 7500 W` is available at all SOC levels. In reality, the BMS tapers charge current above ~85% SOC. This means even when the LP says `cs_t = 5 kW`, the actual charge rate may be 2–3 kW near the top, causing the battery to fill more slowly than planned and export to spike before the LP expected.
+
+*Mitigation:* Lower `config.battery.max_soc` from 95% to 88% in summer. This creates a structural 7% × 15 kWh = 1.05 kWh of natural headroom and keeps the battery in the linear CC region where charge rate is more predictable.
+
+**2. Forecast accuracy**
+Pre-emptive discharge depends on the solar forecast being accurate. If the forecast underestimates (as seen in the audit, 2× ratio in early spring), the LP won't see the overflow coming and won't plan discharge. The intraday re-optimisation loop (triggered when actual/forecast ratio > 1.8×) partially mitigates this by replanning mid-morning once actuals show the day will be sunny.
+
+**3. Same-day replanning latency**
+The export constraint helps most when planned 12–24h ahead (overnight plan). If a clear day wasn't forecast, the intraday replan may have too little time to fully discharge the battery before peak solar. Pre-emptive sell at 08:00–09:00 (low prices) may be economically marginal.
+
+---
+
+### Implementation Plan
+
+1. **`src/optimizer-lp.js`** — Add per-surplus-slot:
+   - `clip_t` variable with bound `0 ≤ clip_t ≤ solar_surplus_t` (can't clip more than production)
+   - Constraint: `- cs_t + sell_t - clip_t ≤ max_export_w - solar_surplus_t`
+   - Objective term: `+ sell_price[t] × h/1000 × clip_t`
+   - Log total predicted clipping (kWh) after solve
+
+2. **`config.js`** — Consider adding `battery.max_soc_summer` (e.g. 88%) with a seasonal selector in the optimizer, or simply lower `max_soc` manually in June.
+
+3. **`battery-optimizer.md`** — Move this section from design to implementation status once built.
 
 ---
 

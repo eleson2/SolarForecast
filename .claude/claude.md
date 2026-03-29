@@ -93,7 +93,7 @@ optimizer-lp.js → battery_schedule (DB) → inverter-dispatcher.js → driver.
 
 ### Adding a price provider
 
-Create `src/prices/<name>.js` exporting `fetchPricesForDate(dateStr, region)`. Must return 96 slots (4×15 min per hour) with `slot_ts` in `"YYYY-MM-DDTHH:MM"` format (configured timezone). Set `config.price.source` to the filename (without `.js`). No other changes needed.
+Create `src/prices/<name>.js` exporting `fetchPricesForDate(dateStr, region)`. Must return 96 slots (4×15 min per hour) with `slot_ts` in `"YYYY-MM-DDTHH:MM"` format (configured timezone). Add the name (without `.js`) to `config.price.sources` — sources are tried in order, first to return data wins.
 
 ### Adding an inverter driver
 
