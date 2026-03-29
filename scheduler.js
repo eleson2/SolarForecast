@@ -363,20 +363,28 @@ async function executePipeline() {
       return;
     }
 
-    // SOC deviation guard — if actual SOC is significantly below the planned curve,
-    // trigger a replan so the optimizer can pick the cheapest upcoming slot to recover.
-    // Do NOT hard-override to charge_grid here — the current slot might be expensive;
-    // the optimizer knows how to find a better time (e.g. 1 hour from now).
-    const socDeviationThreshold = config.battery?.soc_deviation_threshold ?? 10;
+    // SOC deviation guard: actual below plan by more than threshold → replan (price-aware)
+    // unless SOC is below soc_replan_min_soc, in which case charge immediately (safety floor).
+    const socDeviationThreshold = config.battery?.soc_deviation_threshold ?? 8;
+    const socReplanMinSoc = config.battery?.soc_replan_min_soc ?? 30;
     const plannedSoc = slots[0]?.soc_start;
-    let socDeviated = false;
+    let triggerReplan = false;
+    let forceCharge = false;
     if (plannedSoc != null && state.soc < plannedSoc - socDeviationThreshold) {
       const deficit = Math.round(plannedSoc - state.soc);
-      log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — triggering replan`);
-      socDeviated = true;
+      if (state.soc >= socReplanMinSoc) {
+        log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — SOC above ${socReplanMinSoc}%, triggering replan`);
+        triggerReplan = true;
+      } else {
+        log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — SOC below ${socReplanMinSoc}%, forcing charge_grid`);
+        forceCharge = true;
+      }
     }
 
-    const result = await driver.applySchedule(slots, cfg);
+    const dispatchSlots = forceCharge
+      ? [{ ...slots[0], action: 'charge_grid' }, ...slots.slice(1)]
+      : slots;
+    const result = await driver.applySchedule(dispatchSlots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
     // Apply peak shaving limit only when it changes (avoids writing every 15 min)
@@ -392,7 +400,7 @@ async function executePipeline() {
     }
 
     recordPipelineRun('execute');
-    return socDeviated;
+    return triggerReplan;
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);
     // For transient connection failures (timeout, refused) the inverter is likely
@@ -448,8 +456,9 @@ cron.schedule('5 * * * *', () => {
 // Every 15 min: snapshot → execute.
 // batteryPipeline is NOT run here on every cycle — it runs hourly at :30.
 // The stable hourly SOC curve is what lets the deviation guard detect unexpected drain.
-// Exception: if executePipeline detects a SOC deviation, a replan is triggered immediately
-// so the optimizer can find the cheapest upcoming slot to recover (not a hard charge_grid).
+// Exception: if executePipeline detects a SOC deviation above soc_replan_min_soc, a replan
+// is triggered immediately so the optimizer can find the cheapest recovery slot.
+// Below soc_replan_min_soc, charge_grid is forced directly (safety floor — no waiting).
 cron.schedule('*/15 * * * *', async () => {
   await snapshotPipeline();
   if (!config.inverter.data_collection_only) {
@@ -465,10 +474,11 @@ const configPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'c
 let configReloadTimer = null;
 const configWatcher = fs.watch(configPath, () => {
   if (configReloadTimer) return;
+  const debounceMs = config.system?.config_reload_debounce_ms ?? 30000;
   configReloadTimer = setTimeout(() => {
     log.info('scheduler', 'config.js changed — restarting to apply new settings');
     process.exit(0);
-  }, 30000);
+  }, debounceMs);
 });
 process.on('exit', () => configWatcher.close());
 

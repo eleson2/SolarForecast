@@ -61,8 +61,12 @@ export default {
         // forecast errors. Set to 0 to disable the floor and rely solely on confidence.
         min_grid_charge_kwh: 4.0,
         // If actual SOC falls this many percentage points below the optimizer's plan,
-        // executePipeline overrides the current slot to charge_grid to recover the deficit.
-        soc_deviation_threshold: 10,
+        // executePipeline responds. When SOC is above soc_replan_min_soc, a full replan
+        // is triggered so the optimizer can pick the cheapest recovery slot. When SOC is
+        // below soc_replan_min_soc, the current slot is forced to charge_grid immediately
+        // (safety first — don't wait for a replan when the battery is critically low).
+        soc_deviation_threshold: 8,
+        soc_replan_min_soc: 30,
     },
     grid: {
         // Set sell_enabled: true to allow the optimizer to plan battery→grid export slots.
@@ -144,6 +148,11 @@ export default {
         // WARNING: HTTP only — do not expose to the internet without a TLS reverse proxy.
         auth_user: 'admin',
         auth_pass: '',      // set a password to enable
+    },
+    system: {
+        // How long (ms) to wait after a config.js change before restarting.
+        // Guards against editors that write the file multiple times in quick succession.
+        config_reload_debounce_ms: 120000,
     },
     price: {
         // Price sources tried in order — first one to return data wins.

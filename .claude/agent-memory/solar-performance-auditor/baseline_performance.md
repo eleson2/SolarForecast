@@ -1,6 +1,6 @@
 ---
 name: baseline_performance
-description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour as of 2026-03-25
+description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour (last updated 2026-03-29)
 type: project
 ---
 
@@ -65,5 +65,40 @@ type: project
 
 ## Consumption Model
 - R²=0.08 (temperature explains almost none of variance) — persistent WARNING every hour.
-- 8 readings excluded above 5000W threshold (EV charging detection active).
+- 9 readings excluded above 5000W threshold as of 2026-03-29 (EV charging detection active).
 - This R² is expected given variable load + EV charging — not a system failure.
+
+## Solar Forecast Accuracy Baselines (2026-03-29 partial day, updated)
+- Today (2026-03-29) is showing model OVER-forecast: actuals are below forecast, opposite of 2026-03-28.
+- 08:00–11:00: forecast ranged 0.88–3.91 kWh/h, actual 0.50–1.60 kWh/h. Actuals are 40–80% below forecast.
+- MAE for first 5 daytime hours: 1.273 kWh/h. Pattern: intra-day scalar (learned from sunny 2026-03-28) is too high for overcast 2026-03-29.
+- Key finding: intra-day scalars at 08:30 by cloud band: 0%: 0.68x, 25%: 0.20x (cloud cover 32%). The 25% band scalar is being applied at 25% cloud but actual production is still lower. Correction matrix is not yet capturing the March overcast pattern at the correct cloud bands.
+
+## Battery Schedule & SOC (2026-03-28 to 2026-03-29)
+- SOC at 18:00 Mar 28: ~94% (charged from solar during day, sell action fired 15:45–18:15).
+- Discharge overnight 18:00–23:00: from 94% down to 21% at 23:45. Normal — planned.
+- 19 SOC deviations > 10% observed vs plan: all in 19:00–22:15 window (actual consistently 12–20% below plan during discharge). Battery is discharging faster than the LP model projects, likely due to higher-than-modelled actual consumption (3.6–4.9 kW loads vs model's 1.7–2.2 kW estimate).
+- 21:45 spike: actual 32% vs plan 52.4% (−20% — largest overnight deviation). 4955W discharge at 21:45 explains the sudden drop.
+- Battery bottomed at 17% SOC at 05:00, recovered to ~23% by 08:30 via solar.
+- No grid charge scheduled overnight — LP optimizer correctly identified that midday 2026-03-29 prices (0.03–0.11 SEK/kWh) are dramatically cheaper than overnight (0.51–0.59 SEK/kWh). Grid charging was planned for 11:45 onward at <0.11 SEK/kWh.
+- No SOC deviation guard activations observed overnight 2026-03-28 → 2026-03-29.
+- No manual overrides observed.
+
+## Price Optimisation Patterns (SE3, 2026-03-29)
+- Day price range: 0.029–0.602 SEK/kWh (92 slots, 4 missing at 02:00–02:45).
+- Overnight (00:00–09:00) prices unusually HIGH for SE3: avg 0.551 SEK/kWh (vs typical 0.015–0.045). No cheap charging window overnight.
+- Midday cheap window (12:00–17:00): prices drop to 0.029–0.108 SEK/kWh — cheapest midday prices observed in dataset so far.
+- Peak evening: 19:00–20:15 at 0.54–0.60 SEK/kWh. Discharge correctly planned.
+- LP optimizer correctly identified: do NOT charge overnight (expensive), DO charge 11:45–17:00 at sub-0.11 SEK/kWh, then discharge 17:30–22:00+ at 0.34–0.60 SEK/kWh. Estimated savings 9–12 SEK at overnight horizon.
+- Tomorrow's prices (2026-03-30) not yet available as of 01:10 (elprisetjust 404, nordpool 204 empty). Normal behavior.
+
+## Pipeline Health (2026-03-28 to 2026-03-29)
+- 2 config.js restarts in the 24h window: 2026-03-28 19:34, 2026-03-29 01:10. Both caused a double-fire of fetch+battery pipelines at startup.
+- 1 ETIMEDOUT on 2026-03-28 15:00 (single, recovered).
+- 1 ETIMEDOUT on 2026-03-29 07:00 (single, recovered — execute pipeline missed 08:00 cycle).
+- Missing consumption slot: 2026-03-29T02:00 (restart at 01:10 caused boundary offset; 08:05 and 09:05 show further boundary offsets from that restart chain).
+- Missing price slots: 2026-03-29T02:00–02:45 (4 slots — not in DB). These correspond to the restart window; prices likely were not fetched for those 15-min slots.
+- Missing schedule slots: 2026-03-29T02:00–02:45 (4 slots — same cause as price gaps).
+- Missing energy snapshot at 2026-03-29T10:00 (snapshot pipeline fired at 10:15 instead).
+- All pipelines reporting last_status='ok' as of 11:45 on 2026-03-29.
+- smoothPipeline last ran 2026-03-28 01:00 (expected 02:00 — still showing 1h offset from previous observation).

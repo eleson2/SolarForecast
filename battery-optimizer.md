@@ -28,7 +28,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Live SOC seeding         | Done        | Optimizer accepts `options.startSoc` from inverter; scheduler + CLI read SOC before each run |
 | Last-known SOC fallback  | Done        | `lastKnownSoc` in `scheduler.js` — Modbus timeouts no longer reset optimizer to `min_soc` default |
 | Solar forecast confidence| Done        | `battery.solar_forecast_confidence` multiplier + `min_grid_charge_kwh` floor prevent solar forecast from crowding out all grid charging. Both are now **cloud-adjusted**: `effectiveConfidence = confidence × (1 − cloud/100)` at runtime; `effectiveMinReserve` scales to 0 kWh at 100% cloud cover (linearly from 80%) so the battery charges more from grid on fully overcast days. |
-| SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; overrides to `charge_grid` if deficit > `soc_deviation_threshold` |
+| SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; if deficit > `soc_deviation_threshold`: SOC ≥ `soc_replan_min_soc` → triggers replan (price-aware recovery); SOC < `soc_replan_min_soc` → forces `charge_grid` immediately (safety floor) |
 | Manual override API      | Done        | `src/override.js` + `GET/POST/DELETE /battery/override` — persists action across 15-min execute cycles |
 | Modbus retry logic       | Done        | `withReconnect()` retries up to `modbus_retries` times with `modbus_retry_delay_ms` delay (config-driven) |
 | Stale forecast fix       | Done        | `upsertReading` clears `prod_forecast`/`correction_applied` on irradiance update if no `prod_actual` yet; `getReadingsWithoutForecast` always returns future rows so every model run refreshes remaining-day forecasts |
@@ -278,9 +278,11 @@ export default {
         min_grid_charge_kwh: 4.0,
 
         // SOC deviation guard — if actual SOC falls this many percentage points below the
-        // optimizer's planned soc_start for the current slot, executePipeline overrides
-        // the current slot to charge_grid to recover the deficit.
-        soc_deviation_threshold: 10,
+        // optimizer's planned soc_start for the current slot, executePipeline responds:
+        //   SOC >= soc_replan_min_soc → trigger a full replan (price-aware recovery).
+        //   SOC <  soc_replan_min_soc → force charge_grid this slot (safety floor).
+        soc_deviation_threshold: 8,
+        soc_replan_min_soc: 30,
     },
     grid: {
         sell_enabled: false,         // can sell back to grid?
@@ -743,18 +745,29 @@ Valid actions: `charge`, `discharge`, `idle`. Duration: 1–1440 minutes.
 ### SOC Deviation Guard
 
 In addition to the manual override, `executePipeline` includes an automatic reactive
-correction. After computing `futureSlots`, it checks:
+correction. When actual SOC falls more than `soc_deviation_threshold` below the planned
+curve, the response depends on how much charge remains:
 
 ```
-if (slots[0].soc_start - state.soc > soc_deviation_threshold) AND (not already charging)
-→ override futureSlots[0] to charge_grid at max_charge_w
+deficit = slots[0].soc_start − state.soc
+
+if deficit > soc_deviation_threshold:
+    if state.soc >= soc_replan_min_soc:
+        → trigger batteryPipeline immediately (price-aware recovery)
+    else:
+        → force current slot to charge_grid (safety floor — battery too low to wait)
 ```
 
-This fires when actual battery SOC is significantly below what the optimizer planned —
-e.g. unexpectedly high load during the night. The override lasts one 15-minute slot; the
-subsequent `batteryPipeline` re-plans from the corrected SOC.
+**Above `soc_replan_min_soc` (default 30%):** a full replan runs immediately so the
+optimizer can choose the cheapest upcoming slot to recover — avoiding expensive grid
+charging when cheaper prices are imminent.
 
-Configurable via `config.battery.soc_deviation_threshold` (default: 10 %).
+**Below `soc_replan_min_soc`:** the current 15-min slot is overridden to `charge_grid`
+regardless of price. The battery is too low to be selective; the next hourly
+`batteryPipeline` re-plans from the recovered SOC.
+
+Configurable via `config.battery.soc_deviation_threshold` (default: 8 %) and
+`config.battery.soc_replan_min_soc` (default: 30 %).
 
 ---
 
