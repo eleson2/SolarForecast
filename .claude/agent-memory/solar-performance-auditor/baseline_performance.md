@@ -1,6 +1,6 @@
 ---
 name: baseline_performance
-description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour (last updated 2026-03-29)
+description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour (last updated 2026-03-31)
 type: project
 ---
 
@@ -20,11 +20,31 @@ type: project
 - Daytime MAE (hours 08–18 with irradiance>0) on overcast days: ~0.08 kWh/h.
 - On partly-cloudy days with clearing (e.g. 2026-03-25 afternoon), MAE for productive hours can reach ~0.5–1.5 kWh/h due to sudden irradiance bursts.
 
+## Solar Forecast Accuracy Baselines (2026-03-31 — variable cloud, good production)
+- Total actual: 32.0 kWh. Total forecast: 62.1 kWh. Ratio 0.52× (model over-forecasts on days with partial cloud shadow / mountain blocking).
+- MAE: 1.98 kWh/h. MAPE: 138% across 11 active daytime hours.
+- 9 of 11 active hours showed >30% deviation. The forecast was consistently too HIGH — model set to 6.5 kWh/h cap for high irradiance hours but actuals ranged 0.8–6.1 kWh/h.
+- 18:00 was extreme outlier: forecast 6.50 kWh, actual 0.80 kWh (−88%): mountain shadow cut-off combined with cloud. Expected site behaviour.
+- 13:00 was a surprise drop: forecast 6.50 kWh, actual 2.60 kWh (−60%). Cloud cover 5% — suggests a localised cloud shadow event not in Open-Meteo.
+- Intra-day scalar at 15:30 and later runs: 0.57–0.64×, declining as afternoon actuals came in below forecast. Scalar correctly pulled down through the afternoon.
+
 ## Battery Schedule & SOC
 - Typical overnight grid charge window: 01:00–06:00 at prices 0.015–0.045 SEK/kWh (SE3 region sees very low prices in deep night on active days).
 - Peak discharge window: 17:00–19:00, prices reaching 0.5–0.78 SEK/kWh in SE3.
 - SOC deviation guard threshold: 10%. Fired once on 2026-03-25 at 01:15 (actual 41% vs planned 51.8%, −11%). Guard triggered replan correctly.
 - Battery charged to near 100% on cheap nights (observed 94% at 05:00 on 2026-03-25).
+
+## Battery Schedule & SOC (2026-03-31)
+- SOC at midnight: 89%. Battery started the day very high.
+- Overnight price was VERY HIGH: 0.59–0.88 SEK/kWh all night — optimizer correctly discharged battery 02:30–08:30 to near 20%.
+- Battery recovered 09:00–14:00 via sell/charge_solar from PV. Reached 100% by ~14:00 on solar alone.
+- Evening sell window: sell scheduled 15:15–18:45 at prices 0.68–2.00 SEK/kWh. 31 total sell slots today.
+- SOC was stuck at 100% during 15:15–16:30 (6 execute cycles). Inverter was reporting 0W output during sell slots at 100% — NORMAL: inverter is export-limited by peak shaving register at 4.1 kW default.
+- Large SOC deviations in evening sell window: 18:30 actual 82% vs plan 95% (−13%), 18:45 actual 78% vs plan 95% (−17%). Battery discharged faster than planned.
+- Evening discharge (19:00+) had deviations up to −28%. Actual SOC 20% below plan throughout 19:00–19:45 window.
+- No SOC deviation guard activations observed on 2026-03-31 despite large deviations.
+- No manual overrides observed.
+- Grid export totalled 9.5–9.7 kWh today (snapshot data), consistent with sell actions being executed.
 
 ## Pipeline Health Baselines
 - All 7 pipelines (fetch, learn, smooth, battery, consumption, execute, snapshot) reporting ok status.
@@ -32,14 +52,39 @@ type: project
 - smoothPipeline expected at 02:00 — last run shows 01:00 on 2026-03-25 (1h early or smoothPipeline registered differently).
 - executePipeline normally completes in ~2–3s per cycle when hardware is healthy.
 
-## Modbus / Hardware Observations
-- "Modbus exception 1: Illegal function" errors began appearing at 12:00 on 2026-03-25 and continued through 21:30. This is the dominant error type (38 occurrences in 10h). Appears correlated with PM2 restarts (6 scheduler restarts observed on 2026-03-25).
-- ETIMEDOUT errors: 2 occurrences on 2026-03-25 (04:45, plus one during Modbus error cluster).
-- Short "Timed out" errors: 6 occurrences during the afternoon cluster.
-- The pattern of "Illegal function" errors suggests the Modbus write register sequence is being rejected — possibly after a datalogger firmware state change or after too many rapid reconnections post-restart.
-- After errors: system correctly falls back to "leaving inverter in last-written state" for transient errors and resets to default for "Illegal function" errors.
-- No dry_run mode observed. No lastKnownSoc fallback activation seen in logs.
-- Grid export confirmed well below 4.0 kW limit (max observed: ~1.3 kWh exported by 21:30).
+## Modbus / Hardware Observations (2026-03-31)
+- 5 connection errors today: 1 Timed out (07:15), 1 EHOSTUNREACH (14:15), 2 EHOSTUNREACH (16:45 execute + reset), 1 Timed out (17:30 battery SOC read).
+- All errors were brief and recovered within 1 cycle. No sustained outage like 2026-03-25.
+- 16:45 was the worst: EHOSTUNREACH on both execute and reset steps. The 17:00 cycle succeeded normally.
+- lastKnownSoc fallback activated at 16:30 (TCP timeout, used 100%) and 17:30 (Timed out, used 95%).
+- 2 snapshot boundary offsets today: 06:56 and 07:05 (pair — caused by single restart event around 06:56), plus pair at 12:28 and 13:05.
+- 1 config.js restart at 19:57 (user was editing config). Triggered double-fire of fetch+battery.
+- Peak shaving limit set to 12 kW at 19:15 and 19:57 (schedule window: 21:05–23:59 limit_kw=12 — this fired early, suggesting schedule boundaries are matched against local time correctly).
+- Missing consumption slot: 2026-03-31T11:00 not in consumption_readings.
+- 80 of 96 expected energy snapshots present today (16 missing).
+
+## Price Optimisation Patterns (SE3, 2026-03-31)
+- Day price range: 0.443–2.043 SEK/kWh (96 slots). Average: 1.072 SEK/kWh.
+- Unusual price profile: HIGH ALL DAY including overnight (0.59–0.88 SEK/kWh) — no cheap nighttime window.
+- Peak evening: 18:30–21:00 at 1.65–2.04 SEK/kWh. Correctly targeted for sell.
+- Sell enabled: True. sell_price_factor: 0.80. max_export_w: 4000.
+- Planned 31 sell slots today covering 09:00–18:45. Estimated planned sell revenue: ~17.9 SEK.
+- Key insight: "sell" action dispatches same register write as "discharge" (both set discharge_soc floor to 20%). The inverter is load-first — it doesn't actively push to grid. Export happens naturally when PV > load + battery capacity.
+- After 19:00, optimizer switched to "discharge" (not "sell") even though prices were 1.60–2.04 SEK/kWh — because solar_watts = 0, inverter had no solar to export, only battery discharge to cover consumption.
+
+## Consumption Model
+- R²=0.06 (updated from 0.08 — temperature explains even less variance). Persistent WARNING every hour.
+- 9 readings excluded above 5000W threshold as of 2026-03-29 (EV charging detection active).
+- This R² is expected given variable load + EV charging — not a system failure.
+- Status: Expected/acceptable. Not worth filing as a bug unless R² drops further.
+
+## Price Optimisation Patterns (SE3, 2026-03-29)
+- Day price range: 0.029–0.602 SEK/kWh (92 slots, 4 missing at 02:00–02:45).
+- Overnight (00:00–09:00) prices unusually HIGH for SE3: avg 0.551 SEK/kWh (vs typical 0.015–0.045). No cheap charging window overnight.
+- Midday cheap window (12:00–17:00): prices drop to 0.029–0.108 SEK/kWh — cheapest midday prices observed in dataset so far.
+- Peak evening: 19:00–20:15 at 0.54–0.60 SEK/kWh. Discharge correctly planned.
+- LP optimizer correctly identified: do NOT charge overnight (expensive), DO charge 11:45–17:00 at sub-0.11 SEK/kWh, then discharge 17:30–22:00+ at 0.34–0.60 SEK/kWh. Estimated savings 9–12 SEK at overnight horizon.
+- Tomorrow's prices (2026-03-30) not yet available as of 01:10 (elprisetjust 404, nordpool 204 empty). Normal behavior.
 
 ## Price Optimisation Patterns (SE3, 2026-03-28)
 - Day-ahead price range: 0.066–0.694 SEK/kWh (99 slots over 24h+).
@@ -55,25 +100,6 @@ type: project
 - Daily price range on 2026-03-25: 0.016–0.733 SEK/kWh, avg ~0.279 SEK/kWh (24h window including Mar 24 and Mar 26 look-ahead data).
 - LP optimizer savings estimates ranged from 5.2 to 17.8 SEK across the day as the schedule was re-optimised with improving solar actuals.
 
-## Battery Schedule & SOC (2026-03-28)
-- SOC at midnight: 18–20%. Discharged overnight from 90% (2026-03-27 evening) down to 18% by 00:15. Normal — discharge planned all night.
-- Grid charging occurred 01:45–06:00 in 7 burst slots (max 7.5 kW each). Battery recovered to ~73% by 04:30.
-- 13 SOC deviation events > 10% vs plan. Most in 02:45–04:15 window where actual charged FASTER than planned (actual 42–73% vs plan 27–54%). Caused by re-optimization refreshing the plan at the wrong anchor. System healthy — just planning lag.
-- Battery reached 100% SOC at 15:45. Sell action correctly fired 15:45–18:15 during afternoon price peak.
-- No SOC deviation guard activations observed on 2026-03-28.
-- No manual overrides observed on 2026-03-28.
-
-## Consumption Model
-- R²=0.08 (temperature explains almost none of variance) — persistent WARNING every hour.
-- 9 readings excluded above 5000W threshold as of 2026-03-29 (EV charging detection active).
-- This R² is expected given variable load + EV charging — not a system failure.
-
-## Solar Forecast Accuracy Baselines (2026-03-29 partial day, updated)
-- Today (2026-03-29) is showing model OVER-forecast: actuals are below forecast, opposite of 2026-03-28.
-- 08:00–11:00: forecast ranged 0.88–3.91 kWh/h, actual 0.50–1.60 kWh/h. Actuals are 40–80% below forecast.
-- MAE for first 5 daytime hours: 1.273 kWh/h. Pattern: intra-day scalar (learned from sunny 2026-03-28) is too high for overcast 2026-03-29.
-- Key finding: intra-day scalars at 08:30 by cloud band: 0%: 0.68x, 25%: 0.20x (cloud cover 32%). The 25% band scalar is being applied at 25% cloud but actual production is still lower. Correction matrix is not yet capturing the March overcast pattern at the correct cloud bands.
-
 ## Battery Schedule & SOC (2026-03-28 to 2026-03-29)
 - SOC at 18:00 Mar 28: ~94% (charged from solar during day, sell action fired 15:45–18:15).
 - Discharge overnight 18:00–23:00: from 94% down to 21% at 23:45. Normal — planned.
@@ -83,22 +109,3 @@ type: project
 - No grid charge scheduled overnight — LP optimizer correctly identified that midday 2026-03-29 prices (0.03–0.11 SEK/kWh) are dramatically cheaper than overnight (0.51–0.59 SEK/kWh). Grid charging was planned for 11:45 onward at <0.11 SEK/kWh.
 - No SOC deviation guard activations observed overnight 2026-03-28 → 2026-03-29.
 - No manual overrides observed.
-
-## Price Optimisation Patterns (SE3, 2026-03-29)
-- Day price range: 0.029–0.602 SEK/kWh (92 slots, 4 missing at 02:00–02:45).
-- Overnight (00:00–09:00) prices unusually HIGH for SE3: avg 0.551 SEK/kWh (vs typical 0.015–0.045). No cheap charging window overnight.
-- Midday cheap window (12:00–17:00): prices drop to 0.029–0.108 SEK/kWh — cheapest midday prices observed in dataset so far.
-- Peak evening: 19:00–20:15 at 0.54–0.60 SEK/kWh. Discharge correctly planned.
-- LP optimizer correctly identified: do NOT charge overnight (expensive), DO charge 11:45–17:00 at sub-0.11 SEK/kWh, then discharge 17:30–22:00+ at 0.34–0.60 SEK/kWh. Estimated savings 9–12 SEK at overnight horizon.
-- Tomorrow's prices (2026-03-30) not yet available as of 01:10 (elprisetjust 404, nordpool 204 empty). Normal behavior.
-
-## Pipeline Health (2026-03-28 to 2026-03-29)
-- 2 config.js restarts in the 24h window: 2026-03-28 19:34, 2026-03-29 01:10. Both caused a double-fire of fetch+battery pipelines at startup.
-- 1 ETIMEDOUT on 2026-03-28 15:00 (single, recovered).
-- 1 ETIMEDOUT on 2026-03-29 07:00 (single, recovered — execute pipeline missed 08:00 cycle).
-- Missing consumption slot: 2026-03-29T02:00 (restart at 01:10 caused boundary offset; 08:05 and 09:05 show further boundary offsets from that restart chain).
-- Missing price slots: 2026-03-29T02:00–02:45 (4 slots — not in DB). These correspond to the restart window; prices likely were not fetched for those 15-min slots.
-- Missing schedule slots: 2026-03-29T02:00–02:45 (4 slots — same cause as price gaps).
-- Missing energy snapshot at 2026-03-29T10:00 (snapshot pipeline fired at 10:15 instead).
-- All pipelines reporting last_status='ok' as of 11:45 on 2026-03-29.
-- smoothPipeline last ran 2026-03-28 01:00 (expected 02:00 — still showing 1h offset from previous observation).

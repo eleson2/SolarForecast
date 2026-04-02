@@ -73,7 +73,10 @@ export default {
         // Revenue per kWh: spot_price × sell_price_factor − transfer_export_kwh.
         // Only profitable when spot prices are high enough to overcome the efficiency loss
         // and transfer fee. Requires the inverter to support export (check grid operator rules).
-        sell_enabled: true,
+        // On Growatt MOD TL3-XH: also switches inverter to Grid First mode (holding reg 3038 = 2)
+        // during sell slots, enabling active battery→grid export after sunset.
+        // Verify reg 3038 with write-register.js before enabling — see battery-optimizer.md Phase 0.
+        sell_enabled: false,
         sell_price_factor: 0.80,
         // Maximum power the grid operator allows you to export (W).
         // Confirmed at 4.0 kW for this installation via Growatt app.
@@ -136,7 +139,7 @@ export default {
         // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Register 3308 is the export limit.
         // Only written when the value changes (schedule boundary or default_kw edit).
         enabled: true,
-        default_kw: 4.3,
+        default_kw: 4.1,
         schedule: [
             // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
             { from: '00:00', to: '06:45', limit_kw: 12 },

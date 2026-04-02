@@ -188,26 +188,16 @@ async function loadPrices() {
   const data = await fetch('/api/prices').then(r => r.json());
   const prices = data.prices;
 
-  // Aggregate 15-min slots to hourly average
-  const byHour = {};
-  for (const p of prices) {
-    const h = p.slot_ts.slice(0, 13); // "YYYY-MM-DDTHH"
-    if (!byHour[h]) byHour[h] = [];
-    byHour[h].push(p.spot_price);
-  }
-  const labels = Object.keys(byHour).sort();
-  const vals = labels.map(h => {
-    const arr = byHour[h];
-    return arr.reduce((a, b) => a + b, 0) / arr.length;
-  });
+  const sorted = [...prices].sort((a, b) => a.slot_ts.localeCompare(b.slot_ts));
+  const labels = sorted.map(p => p.slot_ts);
+  const vals = sorted.map(p => p.spot_price);
 
   const now = new Date();
-  const nowHour = now.toISOString().slice(0, 13);
-  const bgColors = labels.map(h => {
-    const v = byHour[h].reduce((a, b) => a + b, 0) / byHour[h].length;
-    if (h < nowHour) return 'rgba(80,80,80,0.4)';
-    if (v < 0.5)  return 'rgba(60,180,100,0.7)';
-    if (v < 1.0)  return 'rgba(255,200,60,0.7)';
+  const nowTs = now.toISOString().slice(0, 16).replace('T', 'T'); // "YYYY-MM-DDTHH:MM"
+  const bgColors = sorted.map(p => {
+    if (p.slot_ts < nowTs) return 'rgba(80,80,80,0.4)';
+    if (p.spot_price < 0.5)  return 'rgba(60,180,100,0.7)';
+    if (p.spot_price < 1.0)  return 'rgba(255,200,60,0.7)';
     return 'rgba(220,70,70,0.7)';
   });
 
@@ -216,7 +206,7 @@ async function loadPrices() {
   charts.price = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: labels.map(h => fmtTime(h + ':00')),
+      labels: labels.map(h => fmtTime(h)),
       datasets: [{ data: vals, backgroundColor: bgColors, borderRadius: 3 }],
     },
     options: mergeOptions({
@@ -500,7 +490,8 @@ async function loadSchedule() {
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
-        ySolar: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+        ySolar: { position: 'right', beginAtZero: true, max: invCfg.panel_peak_kw ?? undefined,
+                  grid: { drawOnChartArea: false },
                   title: { display: true, text: 'Solar kW', color: 'rgba(160,220,80,0.9)' },
                   ticks: { color: 'rgba(160,220,80,0.7)' } },
       },
@@ -571,6 +562,9 @@ async function loadHistory() {
 
   const labels           = schedule.map(r => fmtTime(r.slot));
   const socData          = schedule.map(r => r.soc_start ?? null);
+  // Actual SOC from inverter readings (stored every 15 min in energy_snapshots)
+  const socActualByTs    = Object.fromEntries((snapshots ?? []).filter(s => s.battery_soc != null).map(s => [s.ts, s.battery_soc]));
+  const socActualData    = schedule.map(r => socActualByTs[r.slot] ?? null);
   const priceData        = schedule.map(r => r.price_kwh ?? null);
   const barBg            = schedule.map(r => ACTION_BG[r.action] ?? ACTION_BG.idle);
   const minSocData       = schedule.map(r => computeMinReservedSOC(r, invCfg));
@@ -584,7 +578,7 @@ async function loadHistory() {
   const countStr = Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(', ');
   document.getElementById('savingsNote').textContent =
     `Actions over last 24 h — ${countStr}. ` +
-    `SOC & MinReservedSOC on left axis. Price (SEK/kWh) & PeakShavingLimit (kW) on right axes.`;
+    `Actual/Planned SOC & MinReservedSOC on left axis. Price (SEK/kWh) & PeakShavingLimit (kW) on right axes.`;
 
   destroyChart('history');
   const ctx = document.getElementById('historyChart').getContext('2d');
@@ -603,13 +597,26 @@ async function loadHistory() {
         },
         {
           type: 'line',
-          label: 'SOC %',
+          label: 'Planned SOC %',
           data: socData,
           borderColor: '#6ab0ff',
           backgroundColor: 'transparent',
           pointRadius: 0,
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          yAxisID: 'ySoc',
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Actual SOC %',
+          data: socActualData,
+          borderColor: '#ffffff',
+          backgroundColor: 'transparent',
+          pointRadius: 0,
           borderWidth: 2,
           yAxisID: 'ySoc',
+          spanGaps: true,
           order: 1,
         },
         {
@@ -701,7 +708,8 @@ async function loadHistory() {
                   title: { display: true, text: 'SOC %', color: '#6ab0ff' } },
         yPrice: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
                   title: { display: true, text: 'SEK/kWh', color: '#f5c842' } },
-        yPower: { position: 'right', beginAtZero: true, grid: { drawOnChartArea: false },
+        yPower: { position: 'right', beginAtZero: true, max: invCfg.panel_peak_kw ?? undefined,
+                  grid: { drawOnChartArea: false },
                   title: { display: true, text: 'kW', color: '#70d0a0' } },
       },
     },

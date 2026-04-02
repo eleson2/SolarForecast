@@ -98,7 +98,23 @@
       "WebFetch(domain:api.energidataservice.dk)",
       "WebFetch(domain:www.domoticz.com)",
       "WebFetch(domain:forum.domoticz.com)",
-      "WebFetch(domain:gridprice.eu)"
+      "WebFetch(domain:gridprice.eu)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:community.openhab.org)",
+      "Bash(for r:*)",
+      "Bash(do echo:*)",
+      "Read(//g/projects/SolarForecast/**)",
+      "Bash(done)",
+      "Bash(ping:*)",
+      "Bash(netstat -ano)",
+      "Bash(findstr \"LISTENING\")",
+      "Bash(findstr -E \"3000|8080|4000|5000|8000\")",
+      "Bash(tasklist:*)",
+      "Bash(pm2-startup install:*)",
+      "Bash(npm list:*)",
+      "Bash(npm search:*)",
+      "Bash(pm2-startup:*)",
+      "Bash(pm2-service-install:*)"
     ]
   }
 }

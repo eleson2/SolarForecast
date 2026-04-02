@@ -85,8 +85,9 @@ router.get('/schedule', (req, res) => {
     generated_at: now.toISOString(),
     timezone: config.location.timezone,
     inverter_config: {
-      discharge_soc: config.inverter?.discharge_soc ?? 20,
-      charge_soc:    config.inverter?.charge_soc    ?? 90,
+      discharge_soc:  config.inverter?.discharge_soc ?? 20,
+      charge_soc:     config.inverter?.charge_soc    ?? 90,
+      panel_peak_kw:  config.panel?.peak_kw          ?? null,
       peak_shaving: {
         enabled:    config.peak_shaving?.enabled    ?? false,
         default_kw: config.peak_shaving?.default_kw ?? 4.5,
@@ -143,8 +144,9 @@ router.get('/history', (req, res) => {
     generated_at: now.toISOString(),
     timezone: config.location.timezone,
     inverter_config: {
-      discharge_soc: config.inverter?.discharge_soc ?? 20,
-      charge_soc:    config.inverter?.charge_soc    ?? 90,
+      discharge_soc:  config.inverter?.discharge_soc ?? 20,
+      charge_soc:     config.inverter?.charge_soc    ?? 90,
+      panel_peak_kw:  config.panel?.peak_kw          ?? null,
       peak_shaving: {
         enabled:    config.peak_shaving?.enabled    ?? false,
         default_kw: config.peak_shaving?.default_kw ?? 4.5,
@@ -168,6 +170,7 @@ router.get('/history', (req, res) => {
       load_today_kwh:          s.load_today_kwh,
       grid_import_today_kwh:   s.grid_import_today_kwh,
       grid_export_today_kwh:   s.grid_export_today_kwh,
+      battery_soc:             s.battery_soc ?? null,
     })),
   });
 });

@@ -1,6 +1,6 @@
 import os from 'os';
 // Lower process priority so the scheduler doesn't lag the desktop
-try { os.setPriority(os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
+try { os.setPriority(os.constants.priority.PRIORITY_LOW); } catch {}
 
 import cron from 'node-cron';
 import fs from 'fs';
@@ -342,6 +342,13 @@ async function executePipeline() {
     const state = await driver.getState(cfg);
     lastKnownSoc = state.soc;
     log.info('execute', `Inverter SOC: ${state.soc}%, power: ${state.power_w}W, mode: ${state.mode}`);
+
+    // Persist actual SOC into energy snapshot for dashboard historical display.
+    // Use the slot boundary timestamp (not wall-clock) so the dashboard lookup
+    // by slot matches exactly. COALESCE upsert merges with energy totals if
+    // snapshotPipeline already wrote this slot.
+    const { fromTs: slotTs } = currentWindow();
+    upsertEnergySnapshot(slotTs, null, null, null, null, state.soc);
 
     // If a manual override is active, apply it instead of the schedule.
     const activeOverride = getOverride();

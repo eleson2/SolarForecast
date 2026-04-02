@@ -19,7 +19,9 @@ pm2 stop solar-forecast           # stop
 pm2 restart solar-forecast        # restart
 pm2 logs solar-forecast           # stream logs (Ctrl+C to exit)
 pm2 logs solar-forecast --lines 200  # last 200 lines
-pm2 save && pm2 startup           # auto-start on Windows reboot
+pm2 save                          # save process list (run after any pm2 change)
+pm2-startup install               # register auto-start on Windows login (one-time setup, already done)
+pm2-startup uninstall             # remove auto-start
 
 # Log files (also written directly by the app)
 #   logs/app.log       — app log (rotated at 10 MB)

@@ -2,13 +2,17 @@
  * Growatt MOD TL3-XH Modbus TCP driver.
  *
  * Reads telemetry and steers battery via local Modbus TCP instead of cloud API.
- * Uses SOC buffer control — writes a single register (LoadFirstStopSocSet)
- * rather than managing time segments.
+ * Uses SOC buffer control — writes two registers each cycle:
+ *   - holding 3310 (LoadFirstStopSocSet): discharge floor (SOC %)
+ *   - holding 3038 (TOU Period 1): enable/disable Grid First sell window
  *
  * Same interface as growatt.js:
  *   getState(cfg), getMetrics(cfg), applySchedule(slots, cfg), resetToDefault(cfg)
  *
  * Register map (verified empirically — differs from Growatt protocol V1.24 doc):
+ *   - TOU Period 1:            holding 3038 (bit-packed: bits 0-5=min, 6-11=hour, 12-13=mode, 14=enable)
+ *     Configured once via Growatt app as Grid First 00:00–23:59.
+ *     Enable=16384 (0x4000), Disable=0. Written each execute cycle based on sell action.
  *   - LoadFirstStopSocSet:      holding 3310 (discharge floor in load-first mode; 808 is a mirror)
  *   - PeakShavingImportLimit:  holding 3307 (grid import cap, 0.1 kW/unit; value 45 = 4.5 kW)
  *   - PeakShavingExportLimit:  holding 3308 (grid export cap, 0.1 kW/unit; must be ≤ import limit; not written)
@@ -28,6 +32,9 @@ import config from '../../config.js';
 
 const REG = {
   // Holding registers (writable)
+  TOU_PERIOD_1:        3038,    // Time-of-use period 1 — bit-packed: bits 0-5=min, bits 6-11=hour, bits 12-13=mode, bit 14=enable
+                                // Configured via Growatt app as Grid First 00:00–23:59.
+                                // Grid First enable: write 24576 (mode=2 → 8192, enable → 16384). Disable: write 0.
   LOAD_FIRST_STOP_SOC: 3310,    // Discharge floor in load-first mode (808 is a mirror)
   PEAK_SHAVING_POWER:  3307,    // Grid import cap in peak shaving mode (0.1 kW/unit; value 45 = 4.5 kW)
   CHARGE_STOP_SOC:     3048,    // Upper limit — battery stops charging at this SOC
@@ -68,6 +75,14 @@ const WORK_MODES = {
   7: 'pv_offline',          // PV, off-grid/EPS
   8: 'bat_offline',         // battery, off-grid/EPS
 };
+
+// --- TOU period 1 values (holding 3038) ---
+// Reg 3038 is bit-packed: bits 0-5=min, bits 6-11=hour, bits 12-13=mode, bit 14=enable.
+// Configured once via Growatt app: Grid First, 00:00–23:59 (time bits = 0).
+// Mode: 0=Load First, 1=Battery First, 2=Grid First (bits 12-13 → 2×4096=8192).
+// Enable = bit 14 = 16384.  Grid First + enabled = 8192 + 16384 = 24576.
+const TOU_GRID_FIRST_ENABLED  = 24576;  // 0x6000 — Grid First (mode=2) + enable (bit 14), time=00:00
+const TOU_GRID_FIRST_DISABLED = 0;      // period inactive (all bits clear)
 
 // --- Connection management ---
 
@@ -293,16 +308,27 @@ export async function applySchedule(slots, cfg) {
     targetSoc = plannedSoc != null ? Math.max(plannedSoc, dischargeSoc) : dischargeSoc;
   }
 
+  // Enable TOU Grid First period when selling, disable otherwise.
+  // The TOU period (reg 3038) is configured once via the Growatt app as Grid First 00:00–23:59.
+  // Enabling it makes the inverter actively export battery to grid.
+  // Follows grid.sell_enabled — no separate flag needed.
+  const touValue = (action === 'sell' && config.grid?.sell_enabled)
+    ? TOU_GRID_FIRST_ENABLED
+    : TOU_GRID_FIRST_DISABLED;
+  const touLabel = touValue === TOU_GRID_FIRST_ENABLED ? 'Grid First (enabled)' : 'disabled';
+
   if (cfg.dry_run) {
-    console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
+    console.log(`[growatt-modbus] DRY-RUN: would set TOU period 1=${touValue} (${touLabel}), LoadFirstStopSoc=${targetSoc}% (action=${action})`);
     return { applied: 1, skipped: 0 };
   }
 
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
     await throttle();
+    await conn.writeRegisters(REG.TOU_PERIOD_1, [touValue]);
+    await throttle();
     await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [targetSoc]);
-    console.log(`[growatt-modbus] Set LoadFirstStopSoc=${targetSoc}% (action=${currentSlot.action})`);
+    console.log(`[growatt-modbus] Set TOU period 1=${touValue} (${touLabel}), LoadFirstStopSoc=${targetSoc}% (action=${action})`);
     return { applied: 1, skipped: 0 };
   });
 }
@@ -409,14 +435,18 @@ export async function setPeakShavingTarget(targetKw, cfg) {
 export async function resetToDefault(cfg) {
   const defaultSoc = cfg.discharge_soc ?? 20;
   if (cfg.dry_run) {
-    console.log(`[growatt-modbus] DRY-RUN: would reset LoadFirstStopSoc=${defaultSoc}%`);
+    console.log(`[growatt-modbus] DRY-RUN: would reset TOU period 1=disabled, LoadFirstStopSoc=${defaultSoc}%`);
     return;
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
+    // Always disable Grid First TOU period on reset — ensures it is never left
+    // active after a crash or non-transient error.
+    await throttle();
+    await conn.writeRegisters(REG.TOU_PERIOD_1, [TOU_GRID_FIRST_DISABLED]);
     await throttle();
     await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [defaultSoc]);
-    console.log(`[growatt-modbus] Reset LoadFirstStopSoc=${defaultSoc}%`);
+    console.log(`[growatt-modbus] Reset TOU period 1=disabled, LoadFirstStopSoc=${defaultSoc}%`);
   });
 }
 

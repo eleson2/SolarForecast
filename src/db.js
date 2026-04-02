@@ -60,7 +60,8 @@ db.exec(`
     pv_today_kwh          REAL,
     load_today_kwh        REAL,
     grid_import_today_kwh REAL,
-    grid_export_today_kwh REAL
+    grid_export_today_kwh REAL,
+    battery_soc           REAL
   );
 
   CREATE TABLE IF NOT EXISTS battery_schedule (
@@ -84,6 +85,12 @@ db.exec(`
     last_status TEXT
   )
 `);
+
+// --- Migrate energy_snapshots: add battery_soc column if missing ---
+const esCols = db.prepare("PRAGMA table_info(energy_snapshots)").all();
+if (esCols.length > 0 && !esCols.some(c => c.name === 'battery_soc')) {
+  db.exec('ALTER TABLE energy_snapshots ADD COLUMN battery_soc REAL');
+}
 
 // --- consumption_model table (single daytime linear regression) ---
 // Stores one OLS fit across all daytime hours (08–18):
@@ -522,13 +529,14 @@ export function deleteScheduleForRange(fromTs, toTs) {
 
 const energyStmts = {
   upsertSnapshot: db.prepare(`
-    INSERT INTO energy_snapshots (snapshot_ts, pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO energy_snapshots (snapshot_ts, pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh, battery_soc)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(snapshot_ts) DO UPDATE SET
-      pv_today_kwh          = excluded.pv_today_kwh,
-      load_today_kwh        = excluded.load_today_kwh,
-      grid_import_today_kwh = excluded.grid_import_today_kwh,
-      grid_export_today_kwh = excluded.grid_export_today_kwh
+      pv_today_kwh          = COALESCE(excluded.pv_today_kwh,          energy_snapshots.pv_today_kwh),
+      load_today_kwh        = COALESCE(excluded.load_today_kwh,        energy_snapshots.load_today_kwh),
+      grid_import_today_kwh = COALESCE(excluded.grid_import_today_kwh, energy_snapshots.grid_import_today_kwh),
+      grid_export_today_kwh = COALESCE(excluded.grid_export_today_kwh, energy_snapshots.grid_export_today_kwh),
+      battery_soc           = COALESCE(excluded.battery_soc,           energy_snapshots.battery_soc)
   `),
 
   // Get the most recent snapshot at or before a given timestamp
@@ -558,8 +566,8 @@ const energyStmts = {
   `),
 };
 
-export function upsertEnergySnapshot(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh) {
-  return energyStmts.upsertSnapshot.run(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh);
+export function upsertEnergySnapshot(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh, batterySoc = null) {
+  return energyStmts.upsertSnapshot.run(snapshotTs, pvTodayKwh, loadTodayKwh, gridImportTodayKwh, gridExportTodayKwh, batterySoc);
 }
 
 export function getSnapshotAtOrBefore(ts) {

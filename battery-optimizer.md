@@ -44,7 +44,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Consumption collection   | Done        | `getMetrics()` driver interface; hourly cron stores to `consumption_readings` |
 | API / schedule output    | Done        | `src/battery-api.js` — GET /battery/schedule |
 | Transfer tariffs         | Done        | Separate import/export transfer fees + energy tax |
-| Sell to grid             | Done        | `sell_t` LP variable; `sell_price` in objective; `applySchedule` maps `sell` → `discharge_soc` floor; enabled via `grid.sell_enabled` |
+| Sell to grid             | Done        | `sell_t` LP variable; `sell_price` in objective; `applySchedule` maps `sell` → `discharge_soc` floor + optionally Grid First mode (reg 3038=2); enabled via `grid.sell_enabled` + `inverter.grid_first_sell` |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
 | EV-aware scheduling      | Done        | `config.ev`: `enabled`, `charge_watts`, `price_threshold_kwh`. `consumptionPipeline` stores house-only `consumption_w` (strips EV load, tags `'inverter_delta_ev'`). LP optimizer: `maxDis` uses house-only consumption so battery never discharges to cover EV; `maxCgW` subtracts `evLoadW(slot)` from the peak-shaving cap so grid-charge headroom correctly accounts for EV draw. |
 | LP terminal SOC penalty   | Done        | Soft bonus `−avgBuyPrice×0.1×h/1000 × s_N` in LP objective discourages draining battery at end of 24h window, preventing reactive SOC deviation guard from triggering on next cycle |
@@ -650,16 +650,37 @@ Instead of managing time segments (the cloud API approach), the Modbus driver us
   is always in "Load First" mode; this register acts as the discharge floor.
   (Holding register 808 is a mirror. Growatt V1.24 doc says 3082, which doesn't work.)
 
-The `applySchedule()` function translates optimizer actions to a target SOC value:
+The `applySchedule()` function writes two registers each cycle:
 
-| Optimizer action         | SOC target                  | Effect                           |
-|--------------------------|-----------------------------|----------------------------------|
-| `charge_grid` / `charge_solar` | `charge_soc` (default 90%) | High floor → battery charges     |
-| `discharge` / `sell`     | `discharge_soc` (default 20%) | Low floor → battery discharges |
-| `idle`                   | Current SOC                 | Holds current level              |
+| Optimizer action | Reg 3038 (OperatingMode) | Reg 3310 (LoadFirstStopSoc) | Effect |
+|---|---|---|---|
+| `charge_grid` / `charge_solar` | 0 (Load First) | `charge_soc` (90%) | High floor → battery charges |
+| `discharge` | 0 (Load First) | `discharge_soc` (20%) | Low floor → battery discharges to house |
+| `sell` | 2 (Grid First) when `grid.sell_enabled` | `discharge_soc` (20%) | Grid First actively exports battery to grid |
+| `idle` | 0 (Load First) | Current SOC | Holds current level |
 
-This runs every 15 minutes (via `executePipeline` in the scheduler), so the SOC floor
-is continuously adjusted to match the current optimizer slot.
+Reg 3038 (Grid First) is written as `2` for sell slots when `grid.sell_enabled: true`. Default is `0` (Load First) for all other actions. `resetToDefault` always restores reg 3038 = 0 to prevent Grid First mode being left active after a crash.
+
+This runs every 15 minutes (via `executePipeline` in the scheduler), so both registers are continuously adjusted to match the current optimizer slot.
+
+### Grid First sell mode
+
+In Load First mode, battery export is passive — it only occurs when PV surplus overflows a full battery. After sunset, no export happens regardless of the schedule's `sell` slots.
+
+**Holding register 3038** (OperatingMode) switches the inverter to Grid First mode (value 2), which actively pushes battery energy to the grid. This enables `sell` slots to work at any hour, including evening price peaks.
+
+**Before enabling `grid.sell_enabled: true`, verify register 3038 with:**
+```bash
+pm2 stop solar-forecast
+node read-register.js 3038 holding       # should read 0 (Load First)
+node write-register.js 3038 2            # write Grid First — check readback = 2
+                                         # verify Growatt app shows Grid First mode
+                                         # check battery current (input 3170) goes positive
+node write-register.js 3038 0            # restore Load First
+pm2 start solar-forecast
+```
+
+If the readback does not change, reg 3038 may be a different format on this firmware. The V1.24 protocol doc lists 3038 as a bit-packed Time Period 1 start register (bits 13–14 = priority mode). Test empirically before enabling.
 
 ### Telemetry
 
