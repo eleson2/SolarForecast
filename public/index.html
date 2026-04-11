@@ -193,7 +193,7 @@ async function loadPrices() {
   const vals = sorted.map(p => p.spot_price);
 
   const now = new Date();
-  const nowTs = now.toISOString().slice(0, 16).replace('T', 'T'); // "YYYY-MM-DDTHH:MM"
+  const nowTs = now.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
   const bgColors = sorted.map(p => {
     if (p.slot_ts < nowTs) return 'rgba(80,80,80,0.4)';
     if (p.spot_price < 0.5)  return 'rgba(60,180,100,0.7)';

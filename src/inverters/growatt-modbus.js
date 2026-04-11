@@ -95,6 +95,7 @@ const MODBUS_RETRY_MS  = config.inverter?.modbus_retry_delay_ms ?? 4000;
 
 let client = null;
 let lastCmd = 0;
+let lastTouValue = null;  // cache to skip redundant TOU register writes
 
 function timeout(ms, label) {
   return new Promise((_, reject) =>
@@ -324,8 +325,11 @@ export async function applySchedule(slots, cfg) {
 
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
-    await throttle();
-    await conn.writeRegisters(REG.TOU_PERIOD_1, [touValue]);
+    if (touValue !== lastTouValue) {
+      await throttle();
+      await conn.writeRegisters(REG.TOU_PERIOD_1, [touValue]);
+      lastTouValue = touValue;
+    }
     await throttle();
     await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [targetSoc]);
     console.log(`[growatt-modbus] Set TOU period 1=${touValue} (${touLabel}), LoadFirstStopSoc=${targetSoc}% (action=${action})`);
@@ -444,6 +448,7 @@ export async function resetToDefault(cfg) {
     // active after a crash or non-transient error.
     await throttle();
     await conn.writeRegisters(REG.TOU_PERIOD_1, [TOU_GRID_FIRST_DISABLED]);
+    lastTouValue = TOU_GRID_FIRST_DISABLED;
     await throttle();
     await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [defaultSoc]);
     console.log(`[growatt-modbus] Reset TOU period 1=disabled, LoadFirstStopSoc=${defaultSoc}%`);
