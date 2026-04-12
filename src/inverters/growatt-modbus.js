@@ -36,7 +36,8 @@ const REG = {
                                 // Configured via Growatt app as Grid First 00:00–23:59.
                                 // Grid First enable: write 24576 (mode=2 → 8192, enable → 16384). Disable: write 0.
   LOAD_FIRST_STOP_SOC: 3310,    // Discharge floor in load-first mode (808 is a mirror)
-  PEAK_SHAVING_POWER:  3307,    // Grid import cap in peak shaving mode (0.1 kW/unit; value 45 = 4.5 kW)
+  PEAK_SHAVING_IMPORT: 3307,    // Grid import cap in peak shaving mode (0.1 kW/unit; value 45 = 4.5 kW)
+  PEAK_SHAVING_EXPORT: 3308,    // Grid export cap in peak shaving mode (0.1 kW/unit; must be ≤ import limit)
   CHARGE_STOP_SOC:     3048,    // Upper limit — battery stops charging at this SOC
   DISCHARGE_STOP_SOC:  3067,    // Absolute floor — battery never goes below this SOC
 
@@ -409,26 +410,27 @@ export async function idle(cfg) {
 }
 
 /**
- * Set the grid import power cap (peak shaving limit).
- * Writes holding register 3309 (PeakShavingPower), scale 0.1 kW.
- * Example: targetKw=4.5 → register value 45.
- * @param {number} targetKw — desired import limit in kW
+ * Set the grid import and export power caps (peak shaving limits).
+ * Writes holding register 3307 (import, 0.1 kW/unit) and 3308 (export, 0.1 kW/unit).
+ * Example: import_kw=4.5 → register value 45.
+ * @param {{ import_kw: number, export_kw: number }} limits
  * @param {object} cfg — inverter config
- * @returns {Promise<{ target_kw: number, reg_value: number }>}
  */
-export async function setPeakShavingTarget(targetKw, cfg) {
-  const regValue = Math.round(targetKw * 10);
-  console.log(`[growatt-modbus] setPeakShavingTarget: ${targetKw} kW → reg 3309 = ${regValue}`);
+export async function setPeakShavingTarget({ import_kw, export_kw }, cfg) {
+  const importVal = Math.round(import_kw * 10);
+  const exportVal = Math.round(export_kw * 10);
+  console.log(`[growatt-modbus] setPeakShavingTarget: import=${import_kw} kW (reg 3307=${importVal}), export=${export_kw} kW (reg 3308=${exportVal})`);
   if (cfg.dry_run) {
-    console.log(`[growatt-modbus] DRY-RUN: would set PeakShavingPower=${regValue} (${targetKw} kW)`);
-    return { target_kw: targetKw, reg_value: regValue };
+    console.log(`[growatt-modbus] DRY-RUN: would set PeakShavingImport=${importVal}, PeakShavingExport=${exportVal}`);
+    return;
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
     await throttle();
-    await conn.writeRegisters(REG.PEAK_SHAVING_POWER, [regValue]);
-    console.log(`[growatt-modbus] Set PeakShavingPower=${regValue} (${targetKw} kW)`);
-    return { target_kw: targetKw, reg_value: regValue };
+    await conn.writeRegisters(REG.PEAK_SHAVING_IMPORT, [importVal]);
+    await throttle();
+    await conn.writeRegisters(REG.PEAK_SHAVING_EXPORT, [exportVal]);
+    console.log(`[growatt-modbus] Set PeakShavingImport=${importVal} (${import_kw} kW), PeakShavingExport=${exportVal} (${export_kw} kW)`);
   });
 }
 

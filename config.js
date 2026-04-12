@@ -135,15 +135,39 @@ export default {
         // device_sn: '',
     },
     peak_shaving: {
-        // Grid import power cap written to inverter holding register 3307 (PeakShavingPower import).
-        // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Register 3308 is the export limit.
-        // Only written when the value changes (schedule boundary or default_kw edit).
+        // Grid import/export power caps written to inverter holding registers 3307/3308.
+        // Scale: 0.1 kW per unit (value 45 = 4.5 kW). Only written when value changes.
+        //
+        // Resolution order for each 15-min slot:
+        //   1. Find the first date_ranges entry where today's MM-DD falls in [from, to]
+        //      (or entry has default: true as catch-all). Ranges that cross year-end
+        //      (e.g. Oct–Mar: from '10-01' > to '03-31') are handled automatically.
+        //   2. Within that range, find the first schedule window covering the slot time.
+        //   3. Fall back to the range's default_import_kw / default_export_kw.
         enabled: true,
-        default_kw: 4.1,
-        schedule: [
-            // Time-of-day overrides (HH:MM, 24h, local time). First matching window wins.
-            { from: '00:00', to: '06:45', limit_kw: 12 },
-            { from: '21:05', to: '23:59', limit_kw: 12 },
+        date_ranges: [
+            {
+                from: '10-01', to: '03-31',        // Oct–Mar (wraps year boundary)
+                default_import_kw: 4.1,
+                default_export_kw: 4.0,
+                schedule: [
+                    // Raise limit during overnight EV charging hours (HH:MM, first match wins).
+                    { from: '00:00', to: '06:45', import_kw: 12, export_kw: 11 },
+                    { from: '21:05', to: '23:59', import_kw: 12, export_kw: 11 },
+                ],
+            },
+            {
+                from: '04-01', to: '09-30',        // Apr–Sep
+                default_import_kw: 12,
+                default_export_kw: 11,
+                schedule: [],
+            },
+            {
+                default: true,                     // catch-all if no date range matches
+                default_import_kw: 12,
+                default_export_kw: 11,
+                schedule: [],
+            },
         ],
     },
     dashboard: {

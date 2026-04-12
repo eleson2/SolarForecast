@@ -89,9 +89,8 @@ router.get('/schedule', (req, res) => {
       charge_soc:     config.inverter?.charge_soc    ?? 90,
       panel_peak_kw:  config.panel?.peak_kw          ?? null,
       peak_shaving: {
-        enabled:    config.peak_shaving?.enabled    ?? false,
-        default_kw: config.peak_shaving?.default_kw ?? 4.5,
-        schedule:   config.peak_shaving?.schedule   ?? [],
+        enabled:     config.peak_shaving?.enabled     ?? false,
+        date_ranges: config.peak_shaving?.date_ranges ?? [],
       },
     },
     schedule: rows.map(r => ({
@@ -148,9 +147,8 @@ router.get('/history', (req, res) => {
       charge_soc:     config.inverter?.charge_soc    ?? 90,
       panel_peak_kw:  config.panel?.peak_kw          ?? null,
       peak_shaving: {
-        enabled:    config.peak_shaving?.enabled    ?? false,
-        default_kw: config.peak_shaving?.default_kw ?? 4.5,
-        schedule:   config.peak_shaving?.schedule   ?? [],
+        enabled:     config.peak_shaving?.enabled     ?? false,
+        date_ranges: config.peak_shaving?.date_ranges ?? [],
       },
     },
     schedule: schedule.map(r => ({

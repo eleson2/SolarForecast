@@ -73,17 +73,37 @@ export function validateConfig(cfg) {
 
   // --- peak_shaving (optional, validate if enabled) ---
   if (cfg.peak_shaving?.enabled) {
-    finite(cfg.peak_shaving.default_kw, 'peak_shaving.default_kw');
-    need(cfg.peak_shaving.default_kw > 0, 'peak_shaving.default_kw must be positive');
-    for (const entry of (cfg.peak_shaving.schedule || [])) {
-      need(typeof entry.from === 'string' && /^\d{2}:\d{2}$/.test(entry.from),
-        `peak_shaving.schedule entry.from must be "HH:MM" (got ${JSON.stringify(entry.from)})`);
-      need(typeof entry.to === 'string' && /^\d{2}:\d{2}$/.test(entry.to),
-        `peak_shaving.schedule entry.to must be "HH:MM" (got ${JSON.stringify(entry.to)})`);
-      need(entry.from < entry.to,
-        `peak_shaving.schedule entry: from (${entry.from}) must be before to (${entry.to})`);
-      finite(entry.limit_kw, 'peak_shaving.schedule entry.limit_kw');
-      need(entry.limit_kw > 0, 'peak_shaving.schedule entry.limit_kw must be positive');
+    need(Array.isArray(cfg.peak_shaving.date_ranges) && cfg.peak_shaving.date_ranges.length > 0,
+      'peak_shaving.date_ranges must be a non-empty array');
+    const mmddRe = /^\d{2}-\d{2}$/;
+    for (const [i, r] of cfg.peak_shaving.date_ranges.entries()) {
+      const label = `peak_shaving.date_ranges[${i}]`;
+      if (!r.default) {
+        need(typeof r.from === 'string' && mmddRe.test(r.from),
+          `${label}.from must be "MM-DD" (got ${JSON.stringify(r.from)})`);
+        need(typeof r.to === 'string' && mmddRe.test(r.to),
+          `${label}.to must be "MM-DD" (got ${JSON.stringify(r.to)})`);
+      }
+      finite(r.default_import_kw, `${label}.default_import_kw`);
+      need(r.default_import_kw > 0, `${label}.default_import_kw must be positive`);
+      finite(r.default_export_kw, `${label}.default_export_kw`);
+      need(r.default_export_kw > 0, `${label}.default_export_kw must be positive`);
+      need(r.default_export_kw <= r.default_import_kw,
+        `${label}.default_export_kw must be ≤ default_import_kw`);
+      for (const [j, entry] of (r.schedule || []).entries()) {
+        const slabel = `${label}.schedule[${j}]`;
+        need(typeof entry.from === 'string' && /^\d{2}:\d{2}$/.test(entry.from),
+          `${slabel}.from must be "HH:MM" (got ${JSON.stringify(entry.from)})`);
+        need(typeof entry.to === 'string' && /^\d{2}:\d{2}$/.test(entry.to),
+          `${slabel}.to must be "HH:MM" (got ${JSON.stringify(entry.to)})`);
+        need(entry.from < entry.to,
+          `${slabel}: from (${entry.from}) must be before to (${entry.to})`);
+        finite(entry.import_kw, `${slabel}.import_kw`);
+        need(entry.import_kw > 0, `${slabel}.import_kw must be positive`);
+        finite(entry.export_kw, `${slabel}.export_kw`);
+        need(entry.export_kw > 0, `${slabel}.export_kw must be positive`);
+        need(entry.export_kw <= entry.import_kw, `${slabel}.export_kw must be ≤ import_kw`);
+      }
     }
   }
 

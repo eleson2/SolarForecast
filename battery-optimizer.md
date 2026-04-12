@@ -149,7 +149,7 @@ SOC values are read directly from the `s_t` variables — no forward simulation 
 
 **Charge timing tiebreaker:** When overnight prices are flat, HiGHS may pick a degenerate later charge slot with identical cost. A small epsilon (`avgBuyPrice × 0.005 SEK/kWh`) is added linearly to `cg_t` coefficients, making the solver prefer earlier charge slots among equals. This is 10–40× smaller than any price difference the optimizer would act on, so it cannot override genuine late-night price dips.
 
-**Peak shaving charge rate cap:** When `config.peak_shaving.enabled` is true, the grid import cap (e.g. 4.4 kW) limits how fast the battery can charge from the grid. The LP enforces this per-slot as `cg_t ≤ max(0, peakShavingW[t] − consumption_watts[t])`, matching the physical reality that consumption and charging share the same grid connection. Time-of-day schedule overrides (`peak_shaving.schedule`) are also applied per slot.
+**Peak shaving charge rate cap:** When `config.peak_shaving.enabled` is true, the grid import cap limits how fast the battery can charge from the grid. The LP enforces this per-slot as `cg_t ≤ max(0, peakShavingImportW[t] − consumption_watts[t])`, matching the physical reality that consumption and charging share the same grid connection. The active import limit is resolved from `peak_shaving.date_ranges` (seasonal, year-wrap aware) → time-of-day `schedule` within the matched range → `default_import_kw` for that range.
 
 ### Public interface
 
@@ -840,9 +840,17 @@ hours:
 ```js
 peak_shaving: {
     enabled: true,
-    default_kw: 4.4,
-    schedule: [
-        { from: '00:00', to: '06:00', limit_kw: 12 },  // EV + house + battery
+    date_ranges: [
+        {
+            from: '10-01', to: '03-31',       // Oct–Mar (wraps year boundary)
+            default_import_kw: 4.1,
+            default_export_kw: 4.0,
+            schedule: [
+                { from: '00:00', to: '06:45', import_kw: 12, export_kw: 11 },  // EV charging window
+                { from: '21:05', to: '23:59', import_kw: 12, export_kw: 11 },
+            ],
+        },
+        // ... other date ranges ...
     ],
 }
 ```
@@ -905,10 +913,7 @@ The peak shaving layer integrates with the LP optimizer:
 
 ### What is implemented
 
-The register write is live: `POST /battery/control/peak-shaving` calls
-`driver.setPeakShavingTarget(limit_kw)` which writes to holding register 800.
-The scheduler also writes the configured `peak_shaving.default_kw` value on startup
-and can apply time-of-day schedule overrides.
+`executePipeline` resolves import/export limits from `peak_shaving.date_ranges` each cycle and calls `driver.setPeakShavingTarget({ import_kw, export_kw })`, which writes holding registers 3307 (import) and 3308 (export). Limits are only written when the value changes (boundary crossing). Resolution order: seasonal date range (year-wrap aware) → time-of-day schedule within range → range `default_import/export_kw` → catch-all `default: true` entry.
 
 ### What is not yet implemented
 

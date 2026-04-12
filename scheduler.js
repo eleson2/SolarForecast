@@ -20,6 +20,7 @@ import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
 import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio, getIntradaySolarRatioByBand } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride } from './src/override.js';
+import { resolvePeakShavingLimits } from './src/peak-shaving.js';
 import { setLpShadow, setSellShadow } from './src/battery-api.js';
 import config from './config.js';
 import app from './src/api.js';
@@ -315,20 +316,15 @@ async function consumptionPipeline() {
   }
 }
 
-// Returns the peak shaving limit (kW) for the given "YYYY-MM-DDTHH:MM" timestamp,
+// Returns { import_kw, export_kw } for the given "YYYY-MM-DDTHH:MM" timestamp,
 // or null if peak shaving is disabled / not configured.
-function getPeakShavingLimit(psConfig, slotTs) {
-  if (!psConfig?.enabled) return null;
-  const hhmm = slotTs.slice(11, 16); // extract HH:MM
-  for (const entry of (psConfig.schedule || [])) {
-    if (hhmm >= entry.from && hhmm <= entry.to) return entry.limit_kw;
-  }
-  return psConfig.default_kw;
+function getPeakShavingLimits(psConfig, slotTs) {
+  return resolvePeakShavingLimits(psConfig, slotTs);
 }
 
 // --- Inverter execution pipeline ---
 
-let lastPeakShavingKw = null; // track last written value to avoid redundant writes
+let lastPeakShavingKey = null; // track last written "{import}/{export}" to avoid redundant writes
 
 async function executePipeline() {
   const driver = getDriver();
@@ -394,13 +390,14 @@ async function executePipeline() {
     const result = await driver.applySchedule(dispatchSlots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
-    // Apply peak shaving limit only when it changes (avoids writing every 15 min)
-    const psLimit = getPeakShavingLimit(config.peak_shaving, fromTs);
-    if (psLimit !== null && psLimit !== lastPeakShavingKw && typeof driver.setPeakShavingTarget === 'function') {
+    // Apply peak shaving limits only when they change (avoids writing every 15 min)
+    const psLimits = getPeakShavingLimits(config.peak_shaving, fromTs);
+    const psKey = psLimits ? `${psLimits.import_kw}/${psLimits.export_kw}` : null;
+    if (psLimits !== null && psKey !== lastPeakShavingKey && typeof driver.setPeakShavingTarget === 'function') {
       try {
-        await driver.setPeakShavingTarget(psLimit, cfg);
-        lastPeakShavingKw = psLimit;
-        log.info('execute', `Peak shaving limit set: ${psLimit} kW`);
+        await driver.setPeakShavingTarget(psLimits, cfg);
+        lastPeakShavingKey = psKey;
+        log.info('execute', `Peak shaving limits set: import=${psLimits.import_kw} kW, export=${psLimits.export_kw} kW`);
       } catch (psErr) {
         log.warn('execute', `Peak shaving write failed (non-fatal): ${psErr.message}`);
       }

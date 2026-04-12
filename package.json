@@ -5,7 +5,8 @@
   "description": "Solar power generation forecast system with empirical learning",
   "main": "scheduler.js",
   "scripts": {
-    "start": "node scheduler.js"
+    "start": "node scheduler.js",
+    "test": "node --test src/test/*.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",

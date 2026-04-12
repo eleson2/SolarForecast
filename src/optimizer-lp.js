@@ -34,6 +34,7 @@
  */
 
 import config from '../config.js';
+import { resolvePeakShavingLimits } from './peak-shaving.js';
 import {
   getPricesForRange,
   getReadingsForForecast,
@@ -201,16 +202,12 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   // It applies regardless of whether 'enabled' is true — 'enabled' only controls whether
   // the scheduler re-dispatches the register every 15 min.
   const psConfig = config.peak_shaving;
-  function peakShavingLimitW(slotTs) {
-    if (!psConfig?.default_kw) return bat.max_charge_w;
-    const hhmm = slotTs.slice(11, 16);
-    for (const entry of (psConfig.schedule || [])) {
-      if (hhmm >= entry.from && hhmm <= entry.to) return entry.limit_kw * 1000;
-    }
-    return psConfig.default_kw * 1000;
+  function peakShavingImportW(slotTs) {
+    const limits = resolvePeakShavingLimits(psConfig, slotTs);
+    return limits ? limits.import_kw * 1000 : bat.max_charge_w;
   }
-  if (psConfig?.default_kw) {
-    console.log(`[optimizer-lp] Grid import cap: ${psConfig.default_kw} kW → max charge rate = cap − consumption`);
+  if (psConfig?.enabled) {
+    console.log(`[optimizer-lp] Peak shaving enabled — seasonal date-range import caps apply`);
   }
 
   // EV: when enabled, consumption_watts is house-only so maxDis is bounded to house load.
@@ -338,7 +335,7 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
                             Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
     const maxSol = Math.min(bat.max_charge_w,
                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
-    const psLimitW = peakShavingLimitW(slots[t].slot_ts);
+    const psLimitW = peakShavingImportW(slots[t].slot_ts);
     const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts));
     const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
       ? Math.min(maxExportW, bat.max_discharge_w) : 0;
