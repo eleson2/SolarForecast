@@ -115,7 +115,9 @@
       "Bash(npm search:*)",
       "Bash(pm2-startup:*)",
       "Bash(pm2-service-install:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(npm ls:*)",
+      "Bash(git:*)"
     ]
   }
 }

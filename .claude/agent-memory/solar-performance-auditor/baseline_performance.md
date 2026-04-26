@@ -1,6 +1,6 @@
 ---
 name: baseline_performance
-description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour (last updated 2026-03-31)
+description: Observed performance baselines for solar forecast accuracy, pipeline health, and hardware behaviour (last updated 2026-04-13)
 type: project
 ---
 
@@ -109,3 +109,52 @@ type: project
 - No grid charge scheduled overnight — LP optimizer correctly identified that midday 2026-03-29 prices (0.03–0.11 SEK/kWh) are dramatically cheaper than overnight (0.51–0.59 SEK/kWh). Grid charging was planned for 11:45 onward at <0.11 SEK/kWh.
 - No SOC deviation guard activations observed overnight 2026-03-28 → 2026-03-29.
 - No manual overrides observed.
+
+## Solar Forecast Accuracy Baselines (2026-04-12 — full overcast, thin diffuse light)
+- Cloud cover: 100% for all 13 daytime hours (07:00–19:00). Extreme diffuse conditions.
+- Total actual: 5.60 kWh. Total forecast: 3.14 kWh. Ratio 1.78× (model underestimates on pure overcast days — consistent with prior pattern).
+- MAE: 0.181 kWh/h. MAPE: 157% across 13 daytime hours. Both dominated by tiny forecasts producing huge percentage errors.
+- 10 of 13 active hours showed >30% deviation. All biased positive (actual > forecast).
+- Worst hour: 07:00, forecast 0.014 kWh, actual 0.100 kWh (+591%). Morning low-irradiance hours remain most unreliable.
+- Best hours: 12:00 (+23%) and 13:00 (+21%) — correction matrix is learning the peak midday behaviour.
+- 19:00 was forecast 0.037 kWh but actual was 0 kWh (model forecasted residual light, mountain shadow cut it). Expected site behaviour.
+- Intra-day scalar reached 2.60× by 10:30 (raw actual/forecast ratio), clamped throughout the day.
+- Apr 13 partial (07:00–14:00): ratio 1.75× — very similar pattern confirming persistent underestimate on 100% cloud cover days.
+
+## Battery Schedule & SOC (2026-04-12 — complex price structure)
+- Starting SOC at midnight: ~62% (from previous evening's discharge window end).
+- Apr 12 price range: 0.059–1.325 SEK/kWh. Average 0.484 SEK/kWh.
+- Cheapest window: 12:45–15:30, floor 0.059–0.135 SEK/kWh. Optimizer correctly used for grid charging.
+- Peak discharge window: 18:00–23:15 at 0.698–1.325 SEK/kWh. 44 discharge slots planned, price floor 0.35 SEK/kWh.
+- Overnight early (00:00–10:00): mixed idle and some discharge at 0.29–0.51 SEK/kWh. Complex structure.
+- EV charging detected 12:00–15:00 Apr 12 (source: inverter_delta_ev): 4 slots. Actual consumption 14:00 = 5600W (highest of day).
+- 2 SOC deviation guard activations on Apr 12:
+  (1) 15:00: actual 77% vs planned 87.5% (−11%) — triggered replan. Battery had discharged faster during midday charge_grid phase (EV charging taking grid import, pushing SOC plan estimates off).
+  (2) 18:00: actual 67% vs planned 75.2% (−8%) — triggered replan. Below 10% threshold but guard fired anyway (guard threshold may be 8%, not 10%).
+- Evening discharge (17:00–23:45): SOC fell from ~89% at 17:30 to 24% at 23:45. Discharge was smooth and extended — matching the planned pattern.
+- Grid export: 1.7 kWh total for Apr 12. Very modest — most discharge was load-first (covering house load, not exporting).
+- LP optimizer savings estimate: 17–20 SEK throughout the day, fairly stable.
+- Sell shadow (dry-run) tracked discharge closely — sell price not beneficial enough to unlock sell mode.
+- 5 config.js restarts on Apr 12: 12:25, 12:32, 12:42, 13:56, 15:07. All within lunchtime window. Caused extra batteryPipeline runs but no data loss.
+
+## Modbus / Hardware Observations (2026-04-12)
+- 4 execute timeout errors: 03:30, 11:15, 20:30, and 10:15 on Apr 13. All transient, recovered next cycle.
+- 1 snapshot timeout at 13:15 on Apr 13 (TCP connect timeout). Only snapshot affected — execute succeeded on retry.
+- nssm-error.log: empty (0 bytes) — no process-level errors.
+- nssm replaces PM2 as the process manager for this installation (observed 2026-04-13).
+- A process restart occurred around 13:15 on Apr 13 — startup banner visible in nssm-out.log. Triggered by user action (config.js watch or manual restart). Caused day-ahead batteryPipeline to fire at 13:15.
+- Apr 13: 13:15 restart caused tomorrow's prices (2026-04-14) to be fetched and day-ahead optimization to fire. Prices 2026-04-14 were available and loaded correctly.
+- Power reading at 13:15:58 showed −7188.3W (negative = charging). This is the highest charge rate seen in dataset — likely a charge_grid slot in progress.
+- Peak shaving import=12kW, export=11kW set at 13:16. Significantly higher than baseline 4.1kW observed on prior days — this is a new configuration.
+
+## Price Optimisation Patterns (SE3, 2026-04-12)
+- Apr 12 range: 0.059–1.325 SEK/kWh. Avg: 0.484. Complex intraday structure with multiple peaks.
+- Cheapest midday: 12:45–15:30 at 0.059–0.135 SEK/kWh — typical cheap midday solar pattern.
+- Evening peak: 18:00–22:00 at 0.698–1.325 SEK/kWh. Optimizer correctly planned 44 discharge slots from 03:30 onward.
+- Apr 13 range: 0.399–1.436 SEK/kWh. Avg: 0.684. Elevated floor — no sub-0.4 pricing all day.
+- Apr 13: optimizer planned charge_grid at night (00:00–01:45 at ~0.51 SEK) even though prices are high — likely forced by need to fill battery before discharge window. Unusual but rational given high floor prices all day.
+- sell shadow showing 0.00 extra vs discharge on Apr 13 — sell mode offering no marginal benefit (consistent with load-first architecture finding).
+
+## Consumption Model
+- R² updated to 0.079 as of 2026-04-13 (was 0.06–0.08 historically). Effectively unchanged. Still emitting WARN every hour.
+- 455 samples in model as of 2026-04-13 13:00.

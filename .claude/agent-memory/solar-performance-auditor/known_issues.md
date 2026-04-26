@@ -55,6 +55,11 @@ type: project
 - **Root cause:** The correction matrix forecasts are severely low compared to actuals on overcast days — Open-Meteo irradiance dramatically underestimates production under diffuse/overcast sky. The correction matrix has not yet accumulated enough March data to learn the scaling.
 - **Status:** Expected to improve as correction matrix accumulates more March observations (currently ~10 days of March data, 1 sample per cell).
 
+## Issue: SOC deviation guard threshold may be 8%, not 10% (observed 2026-04-12)
+- The 18:00 guard activation on 2026-04-12 showed "actual 67% vs planned 75.2% (−8%)" — an 8% deviation that still triggered the guard.
+- The MEMORY previously recorded 10% as the threshold. Either (a) the log message rounds differently from the actual comparison, (b) the config threshold was changed, or (c) the guard uses `>= 8%` not `> 10%`. Verify against `config.js` soc_deviation_threshold.
+- **Status:** Needs config verification — threshold documentation may be inaccurate.
+
 ## Issue: Consumption model R²=0.06 (persistent, was 0.08)
 - Every hourly learnPipeline run emits "Low R²=0.06 — temperature explains little of the variance; check for EV charging or other large variable loads"
 - This is a known property of this household: EV charging creates large unpredictable load spikes. 9 readings above 5000W are being excluded.
