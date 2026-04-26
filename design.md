@@ -160,7 +160,22 @@ node scheduler.js
 ```
 
 Starts the Express API on port 3000 (or `PORT` env var), registers cron jobs, and runs
-the fetch pipeline immediately on startup. Runs until stopped with Ctrl+C.
+an initial set of pipelines immediately on startup. Runs until stopped with Ctrl+C.
+
+**Startup pipeline order** — pipelines that don't touch the inverter are fired in parallel
+first; the three that open Modbus connections run sequentially to avoid overwhelming the
+datalogger rate-limiter (which causes crash loops when the inverter is temporarily offline):
+
+```
+fetchPipeline()       ┐ parallel — no inverter
+consumptionPipeline() ┘
+await snapshotPipeline()   ┐
+await batteryPipeline()    ├ sequential — one Modbus connection at a time
+await executePipeline()    ┘
+```
+
+A global `process.on('unhandledRejection')` handler logs any rejection that escapes a
+pipeline's try/catch without crashing the process, preventing a secondary crash loop.
 
 ---
 

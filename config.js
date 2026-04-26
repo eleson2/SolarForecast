@@ -179,7 +179,7 @@ export default {
     system: {
         // How long (ms) to wait after a config.js change before restarting.
         // Guards against editors that write the file multiple times in quick succession.
-        config_reload_debounce_ms: 120000,
+        config_reload_debounce_ms: 240000, // 4 min
     },
     price: {
         // Price sources tried in order — first one to return data wins.

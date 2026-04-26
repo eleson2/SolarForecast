@@ -35,6 +35,15 @@ try {
   process.exit(1);
 }
 
+// Global safety net: log unhandled promise rejections instead of crashing.
+// The pipelines all have their own try/catch, but if something slips through
+// (e.g. a fire-and-forget call that throws before its try block) this prevents
+// a crash-restart loop when the inverter is offline.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  log.error('scheduler', 'Unhandled promise rejection (non-fatal)', err);
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Last SOC successfully read from the inverter.
@@ -493,13 +502,17 @@ app.listen(PORT, () => {
   log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
 
-// Run initial pipelines on startup
+// Run initial pipelines on startup.
+// fetchPipeline and consumptionPipeline don't use the inverter — run in parallel.
+// snapshotPipeline, batteryPipeline, and executePipeline all open Modbus connections:
+// run them sequentially so we never hammer the datalogger with concurrent TCP connections,
+// which can trigger its rate-limiter and turn a transient timeout into a crash loop.
 fetchPipeline();
-snapshotPipeline();
 consumptionPipeline();
 (async () => {
+  await snapshotPipeline();
   await batteryPipeline();
   if (!config.inverter.data_collection_only) {
     await executePipeline();
   }
-})();
+})().catch(err => log.error('scheduler', 'Startup pipeline error', err));

@@ -19,8 +19,9 @@ module.exports = {
 
       // Restart policy
       restart_delay: 5000,       // wait 5s before restarting after a crash
-      max_restarts: 10,          // stop retrying after 10 crashes in a row
+      max_restarts: 100,         // give up only after 100 consecutive bad starts — survives prolonged inverter outages without dying permanently
       min_uptime: '30s',         // must stay up ≥30s to count as a successful start
+      exp_backoff_restart_delay: 100, // double the restart delay on each bad start (up to 15s) — slows a crash loop without stopping it
 
       // Memory guard — Node can leak after many hours; restart if it grows too large
       max_memory_restart: '300M',

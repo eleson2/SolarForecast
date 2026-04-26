@@ -737,6 +737,52 @@ timeout occurs, the optimizer uses `lastKnownSoc` instead of falling back to the
 `min_soc` default — which would otherwise cause the solar surplus calculation to assume
 a nearly-empty battery and block all grid charging.
 
+### Startup sequentialization
+
+On cold start `scheduler.js` runs several pipelines immediately. Three of them —
+`snapshotPipeline`, `batteryPipeline`, and `executePipeline` — each open a Modbus TCP
+connection to the datalogger. Running them concurrently (the original design) causes
+problems when the inverter is temporarily unreachable:
+
+1. All three connections time out simultaneously after `modbus_retries × (timeout_ms + retry_delay)`.
+2. The burst of rapid TCP connection attempts triggers the datalogger's rate-limiter.
+3. The rate-limiter causes subsequent connections to fail immediately rather than after a timeout,
+   which can produce errors that escape the pipelines' try/catch blocks.
+4. The resulting unhandled rejection crashes the process → PM2 restarts → same sequence →
+   crash loop repeating every ~21 s until the datalogger recovers.
+
+**Fix:** the three inverter-heavy pipelines now run sequentially at startup:
+
+```
+fetchPipeline()       // no inverter — fire-and-forget
+consumptionPipeline() // no inverter — fire-and-forget
+await snapshotPipeline()
+await batteryPipeline()
+await executePipeline()
+```
+
+Only one Modbus connection is open at a time. A timeout in `snapshotPipeline` is handled
+and logged before `batteryPipeline` begins, so the datalogger's rate-limiter is never
+triggered. Startup takes slightly longer when the inverter is offline (timeouts are
+sequential, not parallel) but the system remains stable.
+
+### Global unhandled-rejection handler
+
+Even with sequentialized startup, a promise rejection could theoretically escape a pipeline's
+try/catch (e.g. a throw before the try block, or an async edge-case in a library). To
+prevent any such leak from crashing the process:
+
+```js
+process.on('unhandledRejection', (reason) => {
+  log.error('scheduler', 'Unhandled promise rejection (non-fatal)', reason);
+});
+```
+
+This is a last-resort safety net, not a substitute for proper error handling. It logs the
+problem without exiting, so PM2 does not restart the process and the inverter is left in
+whatever state it last received. If an unhandled rejection is ever logged it should be
+treated as a bug to fix in the relevant pipeline.
+
 ---
 
 ## Manual Override API

@@ -98,9 +98,16 @@ function logWindows(label, actionSlots, priceFn) {
  * @param {string} toTs
  * @param {Array}  consumptionEstimates  [{hour_ts, consumption_w}]
  * @param {Object} [options]
- * @param {number} [options.startSoc]    Live battery SOC % (0–100)
- * @param {number} [options.intradayScalar]
- * @param {boolean}[options.dryRun]      If true, skip writing to DB
+ * @param {number}   [options.startSoc]        Live battery SOC % (0–100)
+ * @param {number}   [options.intradayScalar]
+ * @param {boolean}  [options.dryRun]          If true, skip writing to DB (legacy; prefer scheduleStore)
+ * @param {Array}    [options.prices]           Inject price rows — skips getPricesForRange DB call.
+ *                                              Each row: { slot_ts, spot_price }
+ * @param {Array}    [options.solarReadings]    Inject solar rows — skips getReadingsForForecast DB call.
+ *                                              Each row: { hour_ts, prod_forecast, irr_forecast, cloud_cover }
+ * @param {Function} [options.scheduleStore]    Inject write function — called as scheduleStore(fromTs, toTs, rows)
+ *                                              instead of deleteScheduleForRange + upsertScheduleBatch.
+ *                                              When provided, dryRun is ignored for writes.
  * @returns {Promise<{schedule: Array, summary: Object}>}
  */
 export async function runOptimizer(fromTs, toTs, consumptionEstimates, options = {}) {
@@ -112,13 +119,13 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
 
   // ── 1. Gather inputs ────────────────────────────────────────────────────────
 
-  const prices = getPricesForRange(fromTs, toTs);
+  const prices = options.prices ?? getPricesForRange(fromTs, toTs);
   if (prices.length === 0) {
     console.log('[optimizer-lp] No price data available for range');
     return { schedule: [], summary: null };
   }
 
-  const solarRows = getReadingsForForecast(fromTs, toTs);
+  const solarRows = options.solarReadings ?? getReadingsForForecast(fromTs, toTs);
 
   const daytimeRows = solarRows.filter(r => r.irr_forecast > 0 && r.cloud_cover != null);
   if (daytimeRows.length > 0) {
@@ -496,7 +503,9 @@ End`;
     consumption_watts: s.consumption_watts,
   }));
 
-  if (!options.dryRun) {
+  if (options.scheduleStore) {
+    options.scheduleStore(fromTs, toTs, dbRows);
+  } else if (!options.dryRun) {
     deleteScheduleForRange(fromTs, toTs);
     upsertScheduleBatch(dbRows);
   }
