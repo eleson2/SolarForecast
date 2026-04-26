@@ -19,7 +19,7 @@ import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
 import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio, getIntradaySolarRatioByBand } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
-import { getOverride } from './src/override.js';
+import { getOverride, setOverride, clearOverrideBySource } from './src/override.js';
 import { resolvePeakShavingLimits } from './src/peak-shaving.js';
 import { setLpShadow, setSellShadow } from './src/battery-api.js';
 import config from './config.js';
@@ -343,10 +343,15 @@ async function executePipeline() {
   try {
     log.info('execute', 'Starting inverter execution pipeline');
 
-    // Read actual SOC
-    const state = await driver.getState(cfg);
+    // Read inverter state. Use getMetrics() when EV auto-charge is enabled so we
+    // can see solar_w and consumption_w for EV detection; otherwise getState() suffices.
+    const evAutoCharge = config.ev?.enabled && config.ev?.auto_charge_grid;
+    const state = evAutoCharge && typeof driver.getMetrics === 'function'
+      ? await driver.getMetrics(cfg)
+      : await driver.getState(cfg);
     lastKnownSoc = state.soc;
-    log.info('execute', `Inverter SOC: ${state.soc}%, power: ${state.power_w}W, mode: ${state.mode}`);
+    log.info('execute', `Inverter SOC: ${state.soc}%, power: ${state.power_w ?? state.battery_w ?? 0}W`
+      + (state.solar_w != null ? `, solar: ${Math.round(state.solar_w)}W, load: ${Math.round(state.consumption_w)}W` : ''));
 
     // Persist actual SOC into energy snapshot for dashboard historical display.
     // Use the slot boundary timestamp (not wall-clock) so the dashboard lookup
@@ -355,10 +360,33 @@ async function executePipeline() {
     const { fromTs: slotTs } = currentWindow();
     upsertEnergySnapshot(slotTs, null, null, null, null, state.soc);
 
-    // If a manual override is active, apply it instead of the schedule.
+    // EV auto-charge: when the EV is drawing power AND solar is not producing,
+    // trigger a 'charge' override so the battery fills to charge_soc (90%) alongside
+    // the EV — useful during Tibber Grid Rewards events.
+    // Detection: total load significantly exceeds max house load alone.
+    // Guard: skip when solar is producing to avoid buying grid power unnecessarily.
+    if (evAutoCharge && state.consumption_w != null) {
+      const maxHouseW   = config.consumption?.max_house_w ?? 5000;
+      const evChargeW   = config.ev?.charge_watts ?? 5300;
+      const solarThresh = config.ev?.auto_charge_solar_threshold_w ?? 200;
+      const evDetected  = state.consumption_w > maxHouseW + evChargeW * 0.5;
+      const solarLow    = (state.solar_w ?? 0) < solarThresh;
+
+      if (evDetected && solarLow) {
+        log.info('execute', `EV charging detected (load ${Math.round(state.consumption_w)}W > house ${maxHouseW}W + half EV ${evChargeW / 2}W) — triggering battery charge`);
+        setOverride('charge', 20, 'ev_detection'); // refreshed every 15-min cycle while EV active
+      } else {
+        clearOverrideBySource('ev_detection');
+        if (evDetected && !solarLow) {
+          log.info('execute', `EV detected but solar active (${Math.round(state.solar_w)}W) — skipping auto-charge`);
+        }
+      }
+    }
+
+    // Apply override if active (manual takes priority; ev_detection was just set above if needed).
     const activeOverride = getOverride();
     if (activeOverride) {
-      log.info('execute', `Manual override active: ${activeOverride.action}, ${activeOverride.remaining_minutes} min remaining`);
+      log.info('execute', `Override active [${activeOverride.source}]: ${activeOverride.action}, ${activeOverride.remaining_minutes} min remaining`);
       if (typeof driver[activeOverride.action] === 'function') {
         await driver[activeOverride.action](cfg);
         log.info('execute', `Applied override action: ${activeOverride.action}`);

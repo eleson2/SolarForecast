@@ -47,6 +47,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Sell to grid             | Done        | `sell_t` LP variable; `sell_price` in objective; `applySchedule` maps `sell` → `discharge_soc` floor + optionally Grid First mode (reg 3038=2); enabled via `grid.sell_enabled` + `inverter.grid_first_sell` |
 | Peak shaving             | Partial     | Register write API (`POST /battery/control/peak-shaving`) implemented; autonomous optimizer integration (monthly peak tracking + reserve capacity) not started — needs real-time consumption metering |
 | EV-aware scheduling      | Done        | `config.ev`: `enabled`, `charge_watts`, `price_threshold_kwh`. `consumptionPipeline` stores house-only `consumption_w` (strips EV load, tags `'inverter_delta_ev'`). LP optimizer: `maxDis` uses house-only consumption so battery never discharges to cover EV; `maxCgW` subtracts `evLoadW(slot)` from the peak-shaving cap so grid-charge headroom correctly accounts for EV draw. |
+| EV auto-charge           | Done        | `executePipeline` detects EV charging from `consumption_w` spike; when solar < threshold, triggers `charge` override (`source='ev_detection'`) so battery fills to 90% alongside EV (Tibber Grid Rewards proxy). Cleared automatically when EV stops or solar appears. Manual override always takes priority. |
 | LP terminal SOC penalty   | Done        | Soft bonus `−avgBuyPrice×0.1×h/1000 × s_N` in LP objective discourages draining battery at end of 24h window, preventing reactive SOC deviation guard from triggering on next cycle |
 | LP noise threshold        | Done        | `NOISE_W` reduced from 50W to 10W — previously suppressed up to 12.5 Wh/slot of valid operations |
 | Consumption EV filter     | Done        | `consumptionPipeline`: if `ev.enabled` and total load > `max_house_w`, stores house-only portion (`total − ev.charge_watts`, min 100 W) tagged `'inverter_delta_ev'`. `estimateConsumption` Path 2: if yesterday's reading > `max_house_w` (legacy guard, still active when `ev.enabled=false`), falls back to `flat_watts`. |
@@ -898,6 +899,41 @@ peak_shaving: {
         },
         // ... other date ranges ...
     ],
+}
+```
+
+### EV auto-charge (battery fills alongside EV)
+
+When Tibber Grid Rewards is active the EV charger is activated externally. The system
+cannot see the Grid Rewards signal directly, but can detect the resulting load spike.
+
+**Detection (in `executePipeline`, every 15 min):**
+
+```
+consumption_w > max_house_w + ev.charge_watts × 0.5   → EV charging detected
+solar_w < ev.auto_charge_solar_threshold_w (200 W)     → no meaningful solar
+```
+
+When both are true a `charge` override (`source = 'ev_detection'`) is set for 20 minutes.
+This causes `driver.charge()` to run, setting `LoadFirstStopSocSet = charge_soc (90%)`.
+The inverter then charges the battery from the grid to 90% alongside the EV.
+
+When EV charging stops (or solar exceeds the threshold), the EV override is cleared
+automatically via `clearOverrideBySource('ev_detection')` and the normal schedule resumes.
+
+**Solar guard:** if solar > 200 W the auto-charge is suppressed. The optimizer already
+plans `charge_solar` for surplus hours — no grid buying is needed or triggered.
+
+**Manual override priority:** a manually set override (`source = 'manual'`) is never
+overwritten by the EV auto-charge logic. Cancel the manual override via
+`DELETE /battery/override` to re-enable automatic behaviour.
+
+**Config:**
+
+```js
+ev: {
+    auto_charge_grid: true,               // enable EV auto-charge feature
+    auto_charge_solar_threshold_w: 200,   // suppress when solar exceeds this (W)
 }
 ```
 

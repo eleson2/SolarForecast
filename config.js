@@ -108,6 +108,15 @@ export default {
         // allows enough grid import for EV + house, e.g. { from: '00:00', to: '06:45', limit_kw: 12 }
         enabled: true,
         charge_watts: 5300,           // nameplate EV charger draw (W)
+
+        // Auto-charge battery when EV charging is detected.
+        // When consumption > max_house_w + charge_watts/2 AND solar < threshold,
+        // executePipeline triggers a 'charge' override so the battery fills to
+        // charge_soc (90%) alongside the EV — useful during Tibber Grid Rewards.
+        // The override is cleared automatically when EV charging stops or solar appears.
+        // A manual override always takes priority over this automatic behaviour.
+        auto_charge_grid: true,
+        auto_charge_solar_threshold_w: 200, // suppress auto-charge when solar exceeds this (W)
     },
     inverter: {
         // Driver: 'growatt' = cloud API (MIN/MIX), 'growatt-modbus' = local Modbus TCP (MOD TL3-XH)
