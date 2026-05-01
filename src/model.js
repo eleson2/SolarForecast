@@ -230,10 +230,25 @@ export function runModel() {
 
     // Core formula: prod_forecast = peak_kw × (poa / 1000) × correction × biasScalar × cloudFactor
     // Capped at peak_kw — panels cannot exceed rated capacity regardless of correction.
-    const prodForecast = Math.min(
+    let prodForecast = Math.min(
       config.panel.peak_kw,
       config.panel.peak_kw * (poaWm2 / 1000) * correction * biasScalar * cloudFactor
     );
+
+    // Cloud-irradiance cap: when cloud cover is high AND irradiance forecast is also high,
+    // the correction matrix + cloudFactor can still over-predict because the matrix was
+    // built on mixed-sky days. Cap at a fraction of the raw physics output to bound the error.
+    const ciCap = config.learning.cloud_irradiance_cap;
+    if (ciCap?.enabled && row.cloud_cover != null && poaWm2 > 0) {
+      const belowMax = ciCap.cloud_pct_max == null || row.cloud_cover <= ciCap.cloud_pct_max;
+      if (belowMax && row.cloud_cover >= ciCap.cloud_pct_threshold && row.irr_forecast >= ciCap.irr_wm2_threshold) {
+        const physicsCapKw = config.panel.peak_kw * (poaWm2 / 1000) * ciCap.cap_factor;
+        if (prodForecast > physicsCapKw) {
+          console.log(`[model] Cloud-irradiance cap at ${row.hour_ts}: ${prodForecast.toFixed(3)} → ${physicsCapKw.toFixed(3)} kW (cloud=${row.cloud_cover}%, irr=${Math.round(row.irr_forecast)} W/m²)`);
+          prodForecast = physicsCapKw;
+        }
+      }
+    }
 
     // Confidence based on irradiance level
     const confidence = Math.min(1.0, row.irr_forecast / config.learning.min_irradiance_weight);

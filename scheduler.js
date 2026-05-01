@@ -17,7 +17,7 @@ import { runSmoother } from './src/smoother.js';
 import { fetchPrices } from './src/price-fetcher.js';
 import { estimateConsumption } from './src/consumption.js';
 import { runOptimizer as runOptimizerLP } from './src/optimizer-lp.js';
-import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, recordPipelineRun, getIntradaySolarRatio, getIntradaySolarRatioByBand } from './src/db.js';
+import { getScheduleForRange, upsertConsumption, updateActual, upsertEnergySnapshot, getSnapshotAtOrBefore, getSnapshotsForRange, recordPipelineRun, getIntradaySolarRatio, getIntradaySolarRatioByBand } from './src/db.js';
 import { getDriver, getDriverConfig } from './src/inverter-dispatcher.js';
 import { getOverride, setOverride, clearOverrideBySource } from './src/override.js';
 import { resolvePeakShavingLimits } from './src/peak-shaving.js';
@@ -275,34 +275,115 @@ async function consumptionPipeline() {
       }
 
       // Compute deltas; handle midnight reset (daily counter drops back to 0)
-      const deltaLoad = snapNow.load_today_kwh >= snapPrev.load_today_kwh
-        ? snapNow.load_today_kwh - snapPrev.load_today_kwh
-        : snapNow.load_today_kwh;  // counter reset — value since midnight is the new reading
+      const midnightReset = snapNow.load_today_kwh < snapPrev.load_today_kwh;
+      const deltaLoad = midnightReset
+        ? snapNow.load_today_kwh  // counter reset — value since midnight is the new reading
+        : snapNow.load_today_kwh - snapPrev.load_today_kwh;
 
-      const deltaPv = snapNow.pv_today_kwh >= snapPrev.pv_today_kwh
-        ? snapNow.pv_today_kwh - snapPrev.pv_today_kwh
-        : snapNow.pv_today_kwh;
+      const pvNow  = snapNow.pv_today_kwh  ?? 0;
+      const pvPrev = snapPrev.pv_today_kwh ?? 0;
+      const deltaPv = pvNow >= pvPrev ? pvNow - pvPrev : pvNow;
 
-      // kWh over 1 hour = average kW = average W × 1000
-      const totalW = deltaLoad * 1000;
-      let consumption_w = totalW;
+      // Midnight-reset artefact: the first snapshot after midnight has accumulated only
+      // a few minutes of energy, making the delta for the 23:00 hour near-zero. Detect
+      // this and substitute flat_watts so the consumption model isn't corrupted.
+      const rawTotalW = deltaLoad * 1000;
+      if (midnightReset && rawTotalW < config.consumption.flat_watts * 0.2) {
+        log.warn('consumption',
+          `${prevHourTs}: midnight-reset delta near zero (${Math.round(rawTotalW)}W) — substituting flat_watts`);
+        upsertConsumption(prevHourTs, config.consumption.flat_watts, outdoorTemp, 'flat_fallback');
+        updateActual(prevHourTs, deltaPv);
+        log.info('consumption', `${prevHourTs}: load=flat_fallback (${config.consumption.flat_watts}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
+        recordPipelineRun('consumption');
+        return;
+      }
+
+      // ── Sub-hourly EV detection ───────────────────────────────────────────────
+      // Build a snapshot chain spanning [snapPrev, …15-min snapshots…, snapNow].
+      // Walk consecutive pairs: normalise each slot to watts, flag slots where
+      // load > max_house_w as EV-charging, and sum house-only energy separately.
+      // This catches both intra-hour EV cycling (missed by hourly averages) and
+      // boundary-offset inflation (a 75-min delta treated as 60 min falsely
+      // exceeds the threshold — per-slot normalisation eliminates the distortion).
+      let consumption_w;
       let consumptionSource = 'inverter_delta';
 
-      if (config.ev?.enabled && config.ev.charge_watts > 0) {
-        const maxHouseW = config.consumption?.max_house_w ?? Infinity;
-        if (totalW > maxHouseW) {
-          consumption_w = Math.max(100, totalW - config.ev.charge_watts);
-          consumptionSource = 'inverter_delta_ev';
-          log.info('consumption',
-            `${prevHourTs}: EV detected (${Math.round(totalW)}W > ${maxHouseW}W) — storing house-only ${Math.round(consumption_w)}W`);
+      const evEnabled  = config.ev?.enabled && (config.ev.charge_watts > 0);
+      const maxHouseW  = config.consumption?.max_house_w ?? Infinity;
+      const evChargeW  = config.ev?.charge_watts ?? 0;
+
+      if (evEnabled && maxHouseW < Infinity) {
+        // Fetch all snapshots in [prevHourTs, currentHourTs]; prepend snapPrev if
+        // it sits before prevHourTs (boundary-offset case).
+        const hourSnaps = getSnapshotsForRange(prevHourTs, currentHourTs);
+        const chain = (snapPrev.snapshot_ts < prevHourTs)
+          ? [snapPrev, ...hourSnaps]
+          : hourSnaps;
+
+        let houseEnergyKwh = 0;
+        let evDetected     = false;
+        let evSlots        = 0;
+
+        for (let i = 1; i < chain.length; i++) {
+          const s0 = chain[i - 1];
+          const s1 = chain[i];
+          const slotMin = (new Date(s1.snapshot_ts) - new Date(s0.snapshot_ts)) / 60000;
+          if (slotMin <= 0) continue;
+
+          // Per-slot kWh (handle midnight reset within the chain)
+          const slotKwh = (s1.load_today_kwh ?? 0) >= (s0.load_today_kwh ?? 0)
+            ? (s1.load_today_kwh ?? 0) - (s0.load_today_kwh ?? 0)
+            : (s1.load_today_kwh ?? 0);
+          if (slotKwh <= 0) { houseEnergyKwh += 0; continue; }
+
+          // Normalise to 1-hour equivalent watts for threshold comparison
+          const slotW = slotKwh / slotMin * 60 * 1000;
+
+          if (slotW > maxHouseW) {
+            // EV charging this slot — strip EV draw, keep house-only energy
+            const houseSlotW   = Math.max(100, slotW - evChargeW);
+            const houseSlotKwh = houseSlotW / 1000 * slotMin / 60;
+            houseEnergyKwh += houseSlotKwh;
+            evDetected = true;
+            evSlots++;
+          } else {
+            houseEnergyKwh += slotKwh;
+          }
         }
+
+        if (chain.length >= 2) {
+          // Normalise accumulated house energy to the actual chain span
+          const spanMin = (new Date(chain[chain.length - 1].snapshot_ts) - new Date(chain[0].snapshot_ts)) / 60000;
+          consumption_w = Math.round(houseEnergyKwh / spanMin * 60 * 1000);
+
+          if (evDetected) {
+            consumptionSource = 'inverter_delta_ev';
+            log.info('consumption',
+              `${prevHourTs}: EV detected in ${evSlots} of ${chain.length - 1} sub-hourly slot(s) — storing house-only ${consumption_w}W`);
+          }
+        } else {
+          // Fewer than 2 snapshots in chain — fall back to time-normalised hourly delta
+          const spanMin = (new Date(snapNow.snapshot_ts) - new Date(snapPrev.snapshot_ts)) / 60000;
+          const normW   = Math.round(deltaLoad * 1000 * 60 / Math.max(1, spanMin));
+          if (normW > maxHouseW) {
+            consumption_w = Math.max(100, normW - evChargeW);
+            consumptionSource = 'inverter_delta_ev';
+            log.info('consumption', `${prevHourTs}: EV detected (normalised ${normW}W, span ${Math.round(spanMin)}min) — storing house-only ${consumption_w}W`);
+          } else {
+            consumption_w = normW;
+          }
+        }
+      } else {
+        // EV detection disabled — just time-normalise
+        const spanMin = (new Date(snapNow.snapshot_ts) - new Date(snapPrev.snapshot_ts)) / 60000;
+        consumption_w = Math.round(deltaLoad * 1000 * 60 / Math.max(1, spanMin));
       }
       upsertConsumption(prevHourTs, consumption_w, outdoorTemp, consumptionSource);
 
       // prod_actual stored in kW (matches prod_forecast units)
       updateActual(prevHourTs, deltaPv);
 
-      log.info('consumption', `${prevHourTs}: load=${deltaLoad.toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
+      log.info('consumption', `${prevHourTs}: load=${(deltaLoad ?? 0).toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
       recordPipelineRun('consumption');
       return;
     }

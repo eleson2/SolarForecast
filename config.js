@@ -35,6 +35,18 @@ export default {
         // where Open-Meteo under-predicts. The scalar applies to all remaining hours, so
         // setting it too high risks over-valuing solar on days where clearing was temporary.
         intraday_scalar_max: 3.0,
+        // Cloud-irradiance cap: when cloud cover is high but irradiance forecast is also
+        // high (conflicting signals that cause severe over-forecasting), cap prod_forecast
+        // at a fraction of the raw physics baseline (peak_kw × poa/1000).
+        // Only fires when BOTH thresholds are exceeded simultaneously.
+        // cap_factor 0.45 = at most 45% of clear-sky physics output under heavy cloud.
+        cloud_irradiance_cap: {
+            enabled: true,
+            cloud_pct_threshold: 30,   // apply when cloud_cover >= this %
+            cloud_pct_max: 65,         // do NOT apply when cloud_cover > this % (heavy overcast already handled by cloudFactor)
+            irr_wm2_threshold: 400,    // apply when irr_forecast >= this W/m²
+            cap_factor: 0.80,          // max fraction of physics baseline allowed (was 0.45 — raised to avoid harming high-diffuse overcast days)
+        },
         // If today's actual/forecast ratio exceeds this, trigger a fresh Open-Meteo
         // fetch before re-optimizing. Captures mid-day NWP updates on days where the
         // morning forecast was badly wrong (e.g., cloud clearing not in the model).
@@ -51,15 +63,15 @@ export default {
         efficiency: 0.90,
         min_soc: 10,
         max_soc: 95,
-        // Fraction of forecasted solar surplus credited when computing grid charging headroom.
-        // 1.0 = trust forecast fully (blocks grid charging if solar alone can fill battery).
-        // 0.7 = apply 30% discount for forecast uncertainty, clouds, seasonal error.
-        // Lower values charge more from grid as insurance; higher values rely more on solar.
-        solar_forecast_confidence: 0.7,
-        // Minimum kWh of grid charging headroom to preserve regardless of solar forecast.
-        // Ensures the optimizer always plans some cheap-grid charging as insurance against
-        // forecast errors. Set to 0 to disable the floor and rely solely on confidence.
-        min_grid_charge_kwh: 4.0,
+        // Small penalty for holding SOC during the pre-sunrise window (3 h before first solar slot).
+        // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
+        // Expressed as a fraction of the average buy price — 0 disables, 0.3 is a gentle nudge.
+        dawn_soc_penalty: 0.3,
+        // Maximum buy price (SEK/kWh, inclusive) at which grid charging is allowed.
+        // Slots with buy_price above this threshold have their charge_grid bound set to zero,
+        // preventing the optimizer from charging at obviously expensive prices.
+        // null = no ceiling (backward-compatible default).
+        charge_grid_max_buy_price: null,
         // If actual SOC falls this many percentage points below the optimizer's plan,
         // executePipeline responds. When SOC is above soc_replan_min_soc, a full replan
         // is triggered so the optimizer can pick the cheapest recovery slot. When SOC is

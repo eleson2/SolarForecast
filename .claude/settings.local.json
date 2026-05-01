@@ -117,7 +117,8 @@
       "Bash(pm2-service-install:*)",
       "Bash(powershell:*)",
       "Bash(npm ls:*)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(awk -F: 'NR>400')"
     ]
   }
 }

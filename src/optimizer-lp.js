@@ -15,6 +15,7 @@
  *                       − Σ buy_price[t]  * d_t    * h/1000
  *                       − Σ sell_price[t] * sell_t * h/1000   [when sell_enabled]
  *                       + Σ sell_price[t] * clip_t * h/1000   [lost revenue; drives pre-emptive discharge]
+ *                       + Σ dawn_penalty  * s_t              [pre-sunrise slots; nudges lower morning SOC]
  *     (h = 0.25 h per slot; /1000 converts W→kW)
  *
  *   Constraints:
@@ -286,6 +287,24 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     }
   }
 
+  // Dawn SOC penalty: positive cost on s_t in the 3 h before first solar slot.
+  // Nudges solver to discharge more aggressively before sunrise, leaving room for solar.
+  const dawnPenaltyWeight = config.battery.dawn_soc_penalty ?? 0;
+  if (dawnPenaltyWeight > 0) {
+    const firstSolarIdx = slots.findIndex(s => s.solar_watts >= MIN_SOLAR_W);
+    if (firstSolarIdx > 0) {
+      const dawnWindowSlots = 12; // 3 hours × 4 slots/hour
+      const dawnStart = Math.max(1, firstSolarIdx - dawnWindowSlots); // skip s_0 (fixed bound)
+      const penaltyCoeff = (dawnPenaltyWeight * avgBuyPrice * h / 1000).toFixed(8);
+      for (let t = dawnStart; t < firstSolarIdx; t++) {
+        objLines.push(`+${penaltyCoeff} s_${t}`);
+      }
+      console.log(`[optimizer-lp] Dawn penalty: weight=${dawnPenaltyWeight} on ` +
+        `${slots[dawnStart].slot_ts.slice(11, 16)}–${slots[firstSolarIdx].slot_ts.slice(11, 16)} ` +
+        `(${firstSolarIdx - dawnStart} slots, coeff=${penaltyCoeff} ${currency}/Wh)`);
+    }
+  }
+
   // Soft penalty for low terminal SOC (subtract bonus for s_N — minimize means solver prefers high s_N)
   objLines.push(`-${endSocBonusCoeff} s_${N}`);
 
@@ -343,7 +362,8 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     const maxSol = Math.min(bat.max_charge_w,
                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
     const psLimitW = peakShavingImportW(slots[t].slot_ts);
-    const maxCgW   = Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts));
+    const priceOk  = bat.charge_grid_max_buy_price == null || slots[t].buy_price <= bat.charge_grid_max_buy_price;
+    const maxCgW   = priceOk ? Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts)) : 0;
     const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
       ? Math.min(maxExportW, bat.max_discharge_w) : 0;
     boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);
@@ -489,6 +509,32 @@ End`;
   logWindows('Charge grid', slots.filter(s => s.action === 'charge_grid'), s => s.buy_price);
   logWindows('Discharge  ', slots.filter(s => s.action === 'discharge'),   s => s.buy_price);
   logWindows('Sell       ', slots.filter(s => s.action === 'sell'),        s => s.sell_price);
+
+  // Warn when the plan leaves the battery at min_soc for an extended idle window.
+  // A long min-soc stretch means the SOC deviation guard will trip on any unexpected load.
+  const MIN_SOC_WARN_SLOTS = 16; // 4 hours
+  let minSocRun = 0;
+  let minSocRunStart = null;
+  for (let t = 0; t < slots.length; t++) {
+    const atFloor = slots[t].soc_start <= (minSocPct + 1);
+    if (atFloor) {
+      if (minSocRun === 0) minSocRunStart = slots[t].slot_ts;
+      minSocRun++;
+    } else {
+      if (minSocRun >= MIN_SOC_WARN_SLOTS) {
+        const endTs = slots[t].slot_ts;
+        console.log(`[optimizer-lp] WARN Battery at min_soc (${minSocPct}%) for ${(minSocRun * 0.25).toFixed(1)}h ` +
+          `(${minSocRunStart.slice(11, 16)}–${endTs.slice(11, 16)}) — SOC guard may trigger on unexpected load`);
+      }
+      minSocRun = 0;
+      minSocRunStart = null;
+    }
+  }
+  if (minSocRun >= MIN_SOC_WARN_SLOTS) {
+    const endTs = slots[slots.length - 1].slot_ts;
+    console.warn(`[optimizer-lp] Battery at min_soc (${minSocPct}%) for ${(minSocRun * 0.25).toFixed(1)}h ` +
+      `(${minSocRunStart.slice(11, 16)}–${endTs.slice(11, 16)}+) — SOC guard may trigger on unexpected load`);
+  }
 
   // ── 9. Write to DB (skip on dry_run) ─────────────────────────────────────────
 

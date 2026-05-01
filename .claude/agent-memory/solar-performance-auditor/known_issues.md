@@ -55,6 +55,12 @@ type: project
 - **Root cause:** The correction matrix forecasts are severely low compared to actuals on overcast days — Open-Meteo irradiance dramatically underestimates production under diffuse/overcast sky. The correction matrix has not yet accumulated enough March data to learn the scaling.
 - **Status:** Expected to improve as correction matrix accumulates more March observations (currently ~10 days of March data, 1 sample per cell).
 
+## Issue: charge_grid during high-price slot (recurring, confirmed 2026-04-30 06:00)
+- **What**: A single charge_grid slot appeared at 06:00 at price 0.979 SEK/kWh, mid-way through an overnight discharge sequence. The slot charged from 22% to 31% SOC.
+- **Context**: Overnight prices were expensive (0.69–1.89 SEK/kWh). The optimizer re-ran at 05:30 and apparently inserted a brief recharge before resuming discharge. This looks like a plan discontinuity caused by SOC having drifted slightly from plan, combined with the intra-day scalar being in flux.
+- **Effect**: Wasted ~0.9% SOC worth of cheap grid import at an expensive price. Minor cost impact (~0.1 SEK). No operational harm.
+- **Status**: Likely a known artefact of hourly re-optimisation — LP recalculates from current SOC and may see brief recharge as locally optimal due to plan discontinuity. Monitor for recurrence.
+
 ## Issue: SOC deviation guard threshold may be 8%, not 10% (observed 2026-04-12)
 - The 18:00 guard activation on 2026-04-12 showed "actual 67% vs planned 75.2% (−8%)" — an 8% deviation that still triggered the guard.
 - The MEMORY previously recorded 10% as the threshold. Either (a) the log message rounds differently from the actual comparison, (b) the config threshold was changed, or (c) the guard uses `>= 8%` not `> 10%`. Verify against `config.js` soc_deviation_threshold.
@@ -82,6 +88,12 @@ type: project
 - The hourly record for 2026-03-31T11:00 is absent from consumption_readings.
 - Cause: restart event around 06:56 (snapshot boundary offset pair observed). The 11:05 consumption run was missed or produced a bad reading that was not stored.
 - This pattern of boundary offset restarts causing missing consumption slots is recurring.
+
+## Issue: Cloud-irradiance cap fires but is insufficient on high-diffuse May days (first observed 2026-05-01)
+- **What**: The cloud-irradiance cap (enabled: true, cloud_pct_threshold: 30, irr_wm2_threshold: 400, cap_factor: 0.45) fired at 11:00, 12:00, and 13:00 on May 1. The cap constrained forecast to 1.94/2.20/2.36 kWh respectively — but actual production was 5.1/5.6/5.9 kWh. The cap helped slightly but the forecast was still 2.5–3× too low.
+- **Root cause**: May 1 had 45–93% cloud cover during the midday peak, yet actual production was extremely high — consistent with a uniform diffuse overcast that lets through 70–85% of GHI. Open-Meteo irradiance values underestimated this. The correction matrix has zero May samples, so no learned correction exists yet. The 0.45 cap factor, combined with a POA-to-GHI physics baseline that's already underestimated, produces a bound that is still far below reality.
+- **Cap has no log statement**: It fires silently. There is no log evidence of cap activation — only deducible from comparing stored prod_forecast to 0.45 × (peak_kw × POA/1000). Added to audit checklist.
+- **Status**: Expected for the first month of May data. Correction matrix will learn this pattern after several May observations. The cap is working correctly given the model state.
 
 ## Issue: SOC stuck at 100% during sell window (observed 2026-03-31)
 - **What**: Between 15:15 and 16:30, executePipeline reported SOC=100% for 6 consecutive cycles. Schedule had sell actions but power output was 0W or very low (219.51W max at 16:30).
