@@ -13,7 +13,7 @@ import log from './logger.js';
  * cloud_cover_yr is stored separately from cloud_cover (Open-Meteo) so both
  * sources remain available for post-hoc accuracy comparison.
  */
-export function parseYrData(data) {
+export function parseYrData(data, storeFn = upsertYrDataBatch) {
   const timeseries = data?.properties?.timeseries;
   if (!timeseries) throw new Error('[yr-parser] Invalid YR response: missing timeseries');
 
@@ -34,7 +34,7 @@ export function parseYrData(data) {
     rows.push([hourTs, cloud, fog]);
   }
 
-  upsertYrDataBatch(rows);
+  storeFn(rows);
   log.info('yr-parse', `Updated ${rows.length} hourly cloud/fog readings from YR`);
   return rows.length;
 }
