@@ -154,7 +154,7 @@ if (!hasDayOfMonth) {
   `);
 }
 
-// --- Migrate solar_readings: add correction_applied and cloud_cover columns if missing ---
+// --- Migrate solar_readings: add correction_applied, cloud_cover, fog_area_fraction columns if missing ---
 
 const srColumns = db.prepare("PRAGMA table_info(solar_readings)").all();
 if (!srColumns.some(c => c.name === 'correction_applied')) {
@@ -162,6 +162,12 @@ if (!srColumns.some(c => c.name === 'correction_applied')) {
 }
 if (!srColumns.some(c => c.name === 'cloud_cover')) {
   db.exec(`ALTER TABLE solar_readings ADD COLUMN cloud_cover REAL`);
+}
+if (!srColumns.some(c => c.name === 'fog_area_fraction')) {
+  db.exec(`ALTER TABLE solar_readings ADD COLUMN fog_area_fraction REAL`);
+}
+if (!srColumns.some(c => c.name === 'cloud_cover_yr')) {
+  db.exec(`ALTER TABLE solar_readings ADD COLUMN cloud_cover_yr REAL`);
 }
 
 // --- Migrate correction_matrix: add total_weight column if missing ---
@@ -228,6 +234,13 @@ const stmts = {
     WHERE hour_ts = ?
   `),
 
+  upsertYrData: db.prepare(`
+    UPDATE solar_readings
+    SET cloud_cover_yr    = COALESCE(?, cloud_cover_yr),
+        fog_area_fraction = COALESCE(?, fog_area_fraction)
+    WHERE hour_ts = ?
+  `),
+
   getUnprocessedActuals: db.prepare(`
     SELECT id, hour_ts, irr_forecast, prod_forecast, prod_actual, cloud_cover
     FROM solar_readings
@@ -252,7 +265,7 @@ const stmts = {
   `),
 
   getReadingsWithoutForecast: db.prepare(`
-    SELECT hour_ts, irr_forecast, cloud_cover
+    SELECT hour_ts, irr_forecast, cloud_cover, cloud_cover_yr, fog_area_fraction
     FROM solar_readings
     WHERE irr_forecast IS NOT NULL
       AND (
@@ -353,6 +366,15 @@ export function updateActual(hourTs, prodActual) {
 
 export function updateCorrection(hourTs, correction) {
   return stmts.updateCorrection.run(correction, hourTs);
+}
+
+export function upsertYrDataBatch(rows) {
+  const tx = db.transaction((items) => {
+    for (const [hourTs, cloudCover, fogFraction] of items) {
+      stmts.upsertYrData.run(cloudCover ?? null, fogFraction ?? null, hourTs);
+    }
+  });
+  return tx(rows);
 }
 
 export function getUnprocessedActuals() {

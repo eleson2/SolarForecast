@@ -1,11 +1,6 @@
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import config from '../config.js';
 import { upsertPricesBatch } from './db.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RAW_DIR = path.join(__dirname, '..', 'data', 'raw');
+import { saveRaw } from './fetcher.js';
 
 /**
  * Format a Date as "YYYY-MM-DD" in configured timezone.
@@ -45,13 +40,7 @@ async function fetchPricesForDate(date) {
       continue;
     }
 
-    // Archive raw JSON
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-    const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
-    const filename = `prices_${source}_${stamp}_${time}_${dateStr}.json`;
-    fs.writeFileSync(path.join(RAW_DIR, filename), JSON.stringify(result.raw, null, 2));
+    const filename = saveRaw(`prices_${source}_${dateStr}`, result.raw);
     console.log(`[price-fetcher] Saved raw price data to ${filename}`);
     if (source !== sources[0]) {
       console.log(`[price-fetcher] Used fallback source: ${source}`);

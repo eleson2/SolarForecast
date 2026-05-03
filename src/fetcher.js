@@ -27,6 +27,13 @@ export async function withRetry(fn, { attempts = 3, delayMs = 5000 } = {}) {
   throw lastErr;
 }
 
+export function saveRaw(prefix, data) {
+  const iso = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15);
+  const filename = `${prefix}_${iso}.json`;
+  fs.writeFileSync(path.join(RAW_DIR, filename), JSON.stringify(data, null, 2));
+  return filename;
+}
+
 export async function fetchWeather() {
   const { lat, lon } = config.location;
 
@@ -46,15 +53,7 @@ export async function fetchWeather() {
     }
 
     const data = await res.json();
-
-    // Write raw JSON to data/raw/
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
-    const time = `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}`;
-    const filename = `openmeteo_${stamp}_${time}.json`;
-    fs.writeFileSync(path.join(RAW_DIR, filename), JSON.stringify(data, null, 2));
-
+    const filename = saveRaw('openmeteo', data);
     log.info('fetch', `Saved raw weather data to ${filename}`);
     return data;
   });

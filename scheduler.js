@@ -9,6 +9,8 @@ import { fileURLToPath } from 'url';
 import { validateConfig } from './src/config-validator.js';
 import { fetchWeather } from './src/fetcher.js';
 import { parseWeatherData } from './src/parser.js';
+import { fetchYr } from './src/yr-fetcher.js';
+import { parseYrData } from './src/yr-parser.js';
 import { localTs } from './src/timeutils.js';
 import { runModel } from './src/model.js';
 import { runLearner } from './src/learner.js';
@@ -69,8 +71,19 @@ function currentWindow() {
 async function fetchPipeline() {
   try {
     log.info('fetch', 'Starting fetch pipeline');
-    const data = await fetchWeather();
-    parseWeatherData(data);
+
+    // Fetch both sources in parallel — no data dependency between them.
+    const [omResult, yrResult] = await Promise.allSettled([fetchWeather(), fetchYr()]);
+
+    if (omResult.status === 'rejected') throw omResult.reason;
+    parseWeatherData(omResult.value);
+
+    if (yrResult.status === 'fulfilled') {
+      parseYrData(yrResult.value);
+    } else {
+      log.warn('fetch', `YR fetch failed (non-fatal, using Open-Meteo cloud data): ${yrResult.reason?.message}`);
+    }
+
     runModel();
     log.info('fetch', 'Fetch pipeline complete');
     recordPipelineRun('fetch');

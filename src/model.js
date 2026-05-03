@@ -1,6 +1,7 @@
 import config from '../config.js';
 import { getReadingsWithoutForecast, getCorrectionCell, getSmoothCell, updateForecast, getLastActualForHour, getRecentActualsForBias } from './db.js';
 import { parseTs, dayOfYear } from './timeutils.js';
+import log from './logger.js';
 
 // Half-saturation constant for irradiance weighting — matches learner.js
 const WEIGHT_K = 50;
@@ -140,7 +141,7 @@ function computeRecencyBias() {
   }
 
   if (totalWeight < min_samples) {
-    console.log(`[model] Recency bias: insufficient data (weight ${totalWeight.toFixed(1)} < ${min_samples}), using 1.0`);
+    log.info('model', `Recency bias: insufficient data (weight ${totalWeight.toFixed(1)} < ${min_samples}), using 1.0`);
     return 1.0;
   }
 
@@ -150,9 +151,9 @@ function computeRecencyBias() {
   const clamped = Math.max(clamp_min, Math.min(clampMax, raw));
 
   if (clamped !== raw) {
-    console.warn(`[model] Recency bias clamped ${raw.toFixed(3)} → ${clamped.toFixed(3)} (adaptive cap ${clampMax.toFixed(2)}× at avg ${avgSamples.toFixed(1)} samples/cell)`);
+    log.warn('model', `Recency bias clamped ${raw.toFixed(3)} → ${clamped.toFixed(3)} (adaptive cap ${clampMax.toFixed(2)}× at avg ${avgSamples.toFixed(1)} samples/cell)`);
   } else {
-    console.log(`[model] Recency bias: ${raw.toFixed(3)} (${rows.length} samples, weight ${totalWeight.toFixed(1)}, cap ${clampMax.toFixed(2)}×)`);
+    log.info('model', `Recency bias: ${raw.toFixed(3)} (${rows.length} samples, weight ${totalWeight.toFixed(1)}, cap ${clampMax.toFixed(2)}×)`);
   }
 
   return clamped;
@@ -165,12 +166,13 @@ function computeRecencyBias() {
 export function runModel() {
   const rows = getReadingsWithoutForecast();
   if (rows.length === 0) {
-    console.log('[model] No new readings to forecast');
+    log.debug('model', 'No new readings to forecast');
     return 0;
   }
 
   const biasScalar = computeRecencyBias();
-  const suppressionMax = config.learning.cloud_suppression_max ?? 0.65;
+  const cloudSuppressionMax = config.learning.cloud_suppression_max ?? 0.65;
+  const fogSuppressionMax   = config.learning.fog_suppression_max   ?? 0.90;
 
   // Pre-load last actuals for all hours so the fallback lookup inside the loop
   // is a Map.get() rather than a DB query per row.
@@ -221,30 +223,38 @@ export function runModel() {
     const correction = (empiricalWeight * matrixCorrection)
                      + ((1 - empiricalWeight) * fallbackCorrection);
 
-    // Cloud-cover suppression: heavy overcast days exceed what the correction matrix
-    // expects because the matrix averages over mixed-sky conditions. Scale down
-    // proportionally to cloud cover so 100% cloud applies the full suppression factor.
-    const cloudFactor = (row.cloud_cover != null)
-      ? 1 - (row.cloud_cover / 100) * suppressionMax
+    // Cloud-cover suppression: use YR value when available (better local accuracy),
+    // fall back to Open-Meteo. Heavy overcast days exceed what the correction matrix
+    // expects because the matrix averages over mixed-sky conditions.
+    const cloudCover = row.cloud_cover_yr ?? row.cloud_cover;
+    const cloudFactor = (cloudCover != null)
+      ? 1 - (cloudCover / 100) * cloudSuppressionMax
       : 1.0;
 
-    // Core formula: prod_forecast = peak_kw × (poa / 1000) × correction × biasScalar × cloudFactor
+    // Fog suppression: fog blocks direct beam more aggressively than cloud cover.
+    // Applied on top of cloudFactor — dense fog near the panels can drop output to
+    // near zero even when cloud_cover is moderate and irradiance forecast is high.
+    const fogFactor = (row.fog_area_fraction != null)
+      ? 1 - (row.fog_area_fraction / 100) * fogSuppressionMax
+      : 1.0;
+
+    // Core formula: prod_forecast = peak_kw × (poa / 1000) × correction × biasScalar × cloudFactor × fogFactor
     // Capped at peak_kw — panels cannot exceed rated capacity regardless of correction.
     let prodForecast = Math.min(
       config.panel.peak_kw,
-      config.panel.peak_kw * (poaWm2 / 1000) * correction * biasScalar * cloudFactor
+      config.panel.peak_kw * (poaWm2 / 1000) * correction * biasScalar * cloudFactor * fogFactor
     );
 
     // Cloud-irradiance cap: when cloud cover is high AND irradiance forecast is also high,
     // the correction matrix + cloudFactor can still over-predict because the matrix was
     // built on mixed-sky days. Cap at a fraction of the raw physics output to bound the error.
     const ciCap = config.learning.cloud_irradiance_cap;
-    if (ciCap?.enabled && row.cloud_cover != null && poaWm2 > 0) {
-      const belowMax = ciCap.cloud_pct_max == null || row.cloud_cover <= ciCap.cloud_pct_max;
-      if (belowMax && row.cloud_cover >= ciCap.cloud_pct_threshold && row.irr_forecast >= ciCap.irr_wm2_threshold) {
+    if (ciCap?.enabled && cloudCover != null && poaWm2 > 0) {
+      const belowMax = ciCap.cloud_pct_max == null || cloudCover <= ciCap.cloud_pct_max;
+      if (belowMax && cloudCover >= ciCap.cloud_pct_threshold && row.irr_forecast >= ciCap.irr_wm2_threshold) {
         const physicsCapKw = config.panel.peak_kw * (poaWm2 / 1000) * ciCap.cap_factor;
         if (prodForecast > physicsCapKw) {
-          console.log(`[model] Cloud-irradiance cap at ${row.hour_ts}: ${prodForecast.toFixed(3)} → ${physicsCapKw.toFixed(3)} kW (cloud=${row.cloud_cover}%, irr=${Math.round(row.irr_forecast)} W/m²)`);
+          if (log.isDebug) log.debug('model', `Cloud-irradiance cap at ${row.hour_ts}: ${prodForecast.toFixed(3)} → ${physicsCapKw.toFixed(3)} kW (cloud=${cloudCover}% [${row.cloud_cover_yr != null ? 'YR' : 'OM'}], irr=${Math.round(row.irr_forecast)} W/m²)`);
           prodForecast = physicsCapKw;
         }
       }
@@ -253,10 +263,12 @@ export function runModel() {
     // Confidence based on irradiance level
     const confidence = Math.min(1.0, row.irr_forecast / config.learning.min_irradiance_weight);
 
+    if (log.isDebug) log.debug('model', `${row.hour_ts}: irr=${Math.round(row.irr_forecast)}W/m² poa=${Math.round(poaWm2)}W/m² cloud=${cloudCover ?? '?'}%[${row.cloud_cover_yr != null ? 'YR' : 'OM'}] fog=${row.fog_area_fraction ?? '?'}% → ${prodForecast.toFixed(3)}kW`);
+
     updateForecast(row.hour_ts, Math.max(0, prodForecast), confidence, correction);
     count++;
   }
 
-  console.log(`[model] Forecasted ${count} hours`);
+  log.info('model', `Forecasted ${count} hours`);
   return count;
 }

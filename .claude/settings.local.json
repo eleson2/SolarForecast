@@ -118,7 +118,10 @@
       "Bash(powershell:*)",
       "Bash(npm ls:*)",
       "Bash(git:*)",
-      "Bash(awk -F: 'NR>400')"
+      "Bash(awk -F: 'NR>400')",
+      "WebFetch(domain:api.met.no)",
+      "WebFetch(domain:developer.yr.no)",
+      "WebFetch(domain:docs.api.met.no)"
     ]
   }
 }

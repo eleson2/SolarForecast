@@ -24,6 +24,9 @@ export default {
         // irradiance-based models still over-predict even after correction.
         // 0.65 → 35% of forecast at 100% cloud, 82.5% at 50% cloud, no effect at 0% cloud.
         cloud_suppression_max: 0.65,
+        // Fog suppression: at 100% fog the forecast is reduced by this fraction (on top of cloud suppression).
+        // Fog fully blocks direct beam; a strong default of 0.9 reflects near-zero output in dense fog.
+        fog_suppression_max: 0.90,
         // Cloud cover % above which a sample is excluded from the correction matrix.
         // Samples taken on heavy-overcast days carry the cloud suppression factor in
         // prod_forecast, so including them would inflate the matrix and partially undo
