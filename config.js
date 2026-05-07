@@ -69,7 +69,7 @@ export default {
         // Small penalty for holding SOC during the pre-sunrise window (3 h before first solar slot).
         // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
         // Expressed as a fraction of the average buy price — 0 disables, 0.3 is a gentle nudge.
-        dawn_soc_penalty: 0.1,
+        dawn_soc_penalty: 0,
         // Maximum buy price (SEK/kWh, inclusive) at which grid charging is allowed.
         // Slots with buy_price above this threshold have their charge_grid bound set to zero,
         // preventing the optimizer from charging at obviously expensive prices.
