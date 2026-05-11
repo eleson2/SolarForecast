@@ -70,6 +70,28 @@ export default {
         // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
         // Expressed as a fraction of the average buy price — 0 disables, 0.3 is a gentle nudge.
         dawn_soc_penalty: 0,
+        // Forward-feasibility ceiling: penalises holding SOC that exceeds what the remaining
+        // consumption-bounded discharge slots can actually absorb in this planning window.
+        // Prevents the LP from hoarding charge overnight when morning/evening windows cannot
+        // fully use it — e.g. battery started at 70%, house load is modest, yet the LP idles
+        // overnight while the grid covers the house instead of spending stranded battery Wh.
+        //
+        // How it works: for each non-solar slot t, the optimizer pre-computes the maximum Wh
+        // it can discharge from t to end of window (bounded by consumption per slot). Any SOC
+        // above that ceiling is "stranded" and earns a soft penalty, nudging earlier discharge.
+        //
+        // Weight = fraction of slot buy-price per Wh above ceiling:
+        //   0      — disabled (original behaviour, no overnight nudge)
+        //   0.10   — very subtle; only fires on large, sustained stranding
+        //   0.20   — default gentle nudge; good starting point
+        //   0.40   — assertive; use if overnight idle persists on clearly high-SOC days
+        //   0.50+  — strong; risk of discharging before a late price peak the model under-sees
+        //
+        // Tune UP if:  battery still idles overnight with obvious spare capacity and the
+        //              morning/evening discharge never approaches the floor.
+        // Tune DOWN if: it discharges the night before a clear price peak earlier than wanted,
+        //               or if overnight discharge eats into capacity needed the next morning.
+        stranded_soc_penalty: 0.20,
         // Maximum buy price (SEK/kWh, inclusive) at which grid charging is allowed.
         // Slots with buy_price above this threshold have their charge_grid bound set to zero,
         // preventing the optimizer from charging at obviously expensive prices.

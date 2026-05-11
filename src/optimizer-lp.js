@@ -233,6 +233,38 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     console.log(`[optimizer-lp] Export cap: ${exportCapW / 1000} kW — will plan pre-emptive discharge to avoid solar clipping`);
   }
 
+  // ── 3b. Forward-feasibility ceiling (stranded SOC) ──────────────────────────
+  //
+  // For each slot t, maxFutureDisWh[t] is the maximum Wh the optimizer can
+  // discharge from t to end of window (bounded by consumption per slot).
+  // Any SOC above (minSocWh + maxFutureDisWh[t]) is "stranded" — it cannot be
+  // deployed within this 24 h horizon regardless of prices.
+  // A soft penalty on esp_t = max(0, s_t − ceiling_t) nudges the LP to discharge
+  // stranded capacity earlier rather than carrying it unused overnight.
+  const strandedPenaltyWeight = bat.stranded_soc_penalty ?? 0;
+  let maxFutureDisWh = null;
+  if (strandedPenaltyWeight > 0) {
+    maxFutureDisWh = new Array(N + 1).fill(0);
+    for (let t = N - 1; t >= 0; t--) {
+      const disT = Math.min(bat.max_discharge_w,
+        Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
+      maxFutureDisWh[t] = maxFutureDisWh[t + 1] + disT * h;
+    }
+    const usableWh    = startSocWh - minSocWh;
+    const strandedWh  = Math.max(0, usableWh - maxFutureDisWh[0]);
+    const activeSlots = slots.filter((s, i) =>
+      i > 0 && s.solar_watts < MIN_SOLAR_W && (minSocWh + maxFutureDisWh[i]) < maxSocWh
+    ).length;
+    if (strandedWh > 50) {
+      console.log(`[optimizer-lp] Stranded SOC: ${(strandedWh / 1000).toFixed(2)} kWh` +
+        ` (usable ${(usableWh / 1000).toFixed(1)} kWh, maxFutureDis ${(maxFutureDisWh[0] / 1000).toFixed(1)} kWh)` +
+        ` — penalty weight=${strandedPenaltyWeight} on ${activeSlots} non-solar slots`);
+    } else {
+      console.log(`[optimizer-lp] Stranded SOC ceiling: none` +
+        ` (maxFutureDis ${(maxFutureDisWh[0] / 1000).toFixed(1)} kWh ≥ usable ${(usableWh / 1000).toFixed(1)} kWh)`);
+    }
+  }
+
   // ── 4. Build LP problem string ───────────────────────────────────────────────
   //
   // Variable index convention (all watts):
@@ -245,9 +277,9 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   // Breaks LP degeneracy on flat overnight price segments (e.g. all slots 01:00–04:00 same price).
   // ε is ~10–40× smaller than any real price difference the optimizer acts on.
   const avgBuyPrice = slots.reduce((s, sl) => s + sl.buy_price, 0) / slots.length;
-  const epsilonPerKwh = avgBuyPrice * 0.005;
+  const epsilonPerKwh = avgBuyPrice * 0.03;
   console.log(`[optimizer-lp] Charge tiebreaker ε=${epsilonPerKwh.toFixed(4)} ${currency}/kWh ` +
-    `(0.5% of avg buy price ${avgBuyPrice.toFixed(3)})`);
+    `(3% of avg buy price ${avgBuyPrice.toFixed(3)}) — prefers earlier cheap slots`);
 
   // Objective: minimize Σ coeff_t * cg_t − Σ coeff_t * d_t − endSocBonus * s_N
   // The end-SOC bonus is a soft incentive to end the 24h window with higher SOC,
@@ -308,6 +340,18 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   // Soft penalty for low terminal SOC (subtract bonus for s_N — minimize means solver prefers high s_N)
   objLines.push(`-${endSocBonusCoeff} s_${N}`);
 
+  // Stranded SOC penalty: esp_t = max(0, s_t − ceiling_t) in non-solar slots.
+  // Positive cost nudges the LP to discharge stranded capacity earlier.
+  if (strandedPenaltyWeight > 0 && maxFutureDisWh) {
+    for (let t = 1; t < N; t++) {
+      if (slots[t].solar_watts >= MIN_SOLAR_W) continue;
+      const ceilingWh = minSocWh + maxFutureDisWh[t];
+      if (ceilingWh >= maxSocWh) continue;
+      const coeff = (strandedPenaltyWeight * slots[t].buy_price * h / 1000).toFixed(8);
+      objLines.push(`+${coeff} esp_${t}`);
+    }
+  }
+
   // Wrap long objective over multiple lines (LP format allows leading whitespace)
   const objStr = objLines.join('\n    + ').replace(/\+ -/g, '- ');
 
@@ -345,6 +389,16 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     }
   }
 
+  // Forward-feasibility ceiling: esp_t − s_t >= −ceilingWh  (linearises max(0, s_t − ceiling))
+  if (strandedPenaltyWeight > 0 && maxFutureDisWh) {
+    for (let t = 1; t < N; t++) {
+      if (slots[t].solar_watts >= MIN_SOLAR_W) continue;
+      const ceilingWh = minSocWh + maxFutureDisWh[t];
+      if (ceilingWh >= maxSocWh) continue;
+      constrLines.push(`  ffc_${t}: esp_${t} - s_${t} >= ${(-ceilingWh).toFixed(4)}`);
+    }
+  }
+
   // Variable bounds
   const boundLines = [];
 
@@ -378,6 +432,16 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
       if (surplusW > 0) {
         boundLines.push(`  0 <= clip_${t} <= ${surplusW.toFixed(4)}`);
       }
+    }
+  }
+
+  // Stranded SOC slack variable bounds
+  if (strandedPenaltyWeight > 0 && maxFutureDisWh) {
+    for (let t = 1; t < N; t++) {
+      if (slots[t].solar_watts >= MIN_SOLAR_W) continue;
+      const ceilingWh = minSocWh + maxFutureDisWh[t];
+      if (ceilingWh >= maxSocWh) continue;
+      boundLines.push(`  0 <= esp_${t} <= ${maxSocWh.toFixed(4)}`);
     }
   }
 

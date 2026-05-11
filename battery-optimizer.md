@@ -55,6 +55,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Cloud-irradiance cap      | Done        | `model.js`: when `cloud_pct_threshold (30%) ≤ cloud_cover ≤ cloud_pct_max (65%)` AND `irr_forecast ≥ irr_wm2_threshold (400 W/m²)`, caps `prod_forecast` at `cap_factor (0.80)` × physics baseline. Targets the "conflicting signals" zone where patchy cloud meets high irradiance forecasts. Heavy overcast (cloud > 65%) is excluded — cloudFactor already handles it, and high-diffuse overcast can exceed the physics baseline legitimately. Logs when it fires. Config: `learning.cloud_irradiance_cap`. |
 | charge_grid price ceiling | Done        | `optimizer-lp.js`: `config.battery.charge_grid_max_buy_price` (default `null` = disabled). When set, slots with `buy_price > threshold` have their `cg_t` upper bound zeroed, preventing grid charging at clearly expensive prices. |
 | Min-SOC idle window warning | Done      | `optimizer-lp.js`: after solving, scans schedule for consecutive slots at `min_soc ± 1%`. If the run exceeds 4 hours, logs a WARN with the time range so the operator knows the SOC deviation guard may trip on unexpected load. |
+| Stranded SOC / forward-feasibility ceiling | Done | `optimizer-lp.js`: pre-computes `maxFutureDisWh[t]` — the maximum Wh dischargeable from slot `t` to end of window (consumption-bounded). Adds slack variable `esp_t = max(0, s_t − (minSoc + maxFutureDisWh[t]))` with a soft penalty in the objective for non-solar slots where the battery holds more charge than it can ever deploy. Prevents the LP from hoarding charge overnight when morning/evening consumption is too modest to absorb it all. Config: `config.battery.stranded_soc_penalty` (default 0.20 = 20% of slot buy-price per Wh above ceiling; 0 disables). Tune upward if overnight idle persists with obvious spare capacity; tune downward if it discharges too aggressively before a late price peak. |
 
 ---
 
@@ -101,9 +102,11 @@ The `intradayScalar` (actual/forecast ratio for completed daylight hours) is app
 minimize  Σ buy_price[t]  × cg_t   × h/1000
         − Σ buy_price[t]  × d_t    × h/1000
         − Σ sell_price[t] × sell_t × h/1000   [when grid.sell_enabled]
+        − endSocBonusCoeff × s_N
+        + Σ strandedPenalty[t] × esp_t         [non-solar slots, when stranded_soc_penalty > 0]
 ```
 
-where `h = 0.25` (slot duration in hours). Charging costs money; discharging avoids buying at `buy_price`; selling earns `sell_price = spot × sell_price_factor − transfer_export_kwh`.
+where `h = 0.25` (slot duration in hours). Charging costs money; discharging avoids buying at `buy_price`; selling earns `sell_price = spot × sell_price_factor − transfer_export_kwh`. The end-SOC bonus (`avgBuyPrice × 0.1 × h/1000` per Wh) discourages draining the battery in the last slot. The stranded SOC penalty (`stranded_soc_penalty × buy_price[t] × h/1000` per Wh) penalises holding SOC above the forward-feasibility ceiling — see **Stranded SOC** below.
 
 **Variables per slot** `t = 0…N-1` (N = 96 for 24 h):
 
@@ -130,6 +133,32 @@ d_t + sell_t ≤ max_discharge_w    ∀t
 ```
 
 Mutual exclusion (no simultaneous charge + discharge) is not needed explicitly — round-trip efficiency < 1 makes it always net-negative in the objective, so the solver never chooses both in the same slot.
+
+### Stranded SOC — forward-feasibility ceiling
+
+The LP correctly prioritises high-price slots over low-price ones. On days where the battery starts fully charged but the high-price morning/evening windows can only absorb a fraction of available capacity (because discharge is consumption-bounded — the battery can't push faster than the house draws), the optimizer may idle overnight even though the "leftover" capacity can never be used later in the window.
+
+**Forward-feasibility ceiling:** for each slot `t`, pre-compute:
+
+```
+maxFutureDisWh[t] = Σ_{s=t}^{N-1} min(max_discharge_w, max(0, consumption_s − solar_s)) × h
+```
+
+This is the maximum Wh the optimizer can *physically* discharge from slot `t` to end of window. Any SOC above `minSocWh + maxFutureDisWh[t]` is stranded — it cannot be depleted regardless of prices.
+
+A slack variable `esp_t ≥ max(0, s_t − (minSocWh + maxFutureDisWh[t]))` is introduced for each non-solar slot where the ceiling binds. A soft penalty `stranded_soc_penalty × buy_price[t] × h/1000` per Wh pushes the LP to discharge stranded capacity earlier rather than carry it overnight unused.
+
+**Constraint added (one per qualifying non-solar slot):**
+```
+ffc_t:  esp_t − s_t  ≥  −(minSocWh + maxFutureDisWh[t])
+        esp_t ≥ 0
+```
+
+**Tuning** (`config.battery.stranded_soc_penalty`):
+- `0` — disabled (original behaviour)
+- `0.20` — default gentle nudge; overnight discharge activates only when the ceiling clearly binds
+- `0.50` — moderately assertive; acceptable if overnight idle persists on high-SOC days
+- Too high → may discharge before a late price peak that the consumption forecast underestimates; lower if that happens
 
 ### Solver
 
