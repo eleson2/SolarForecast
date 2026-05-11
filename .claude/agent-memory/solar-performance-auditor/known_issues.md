@@ -89,6 +89,32 @@ type: project
 - Cause: restart event around 06:56 (snapshot boundary offset pair observed). The 11:05 consumption run was missed or produced a bad reading that was not stored.
 - This pattern of boundary offset restarts causing missing consumption slots is recurring.
 
+## Issue: Sustained Modbus outage 2026-05-07 08:00–20:00 (12h) — UNRESOLVED
+- **What**: 175 error events on May 7. All execute cycles 08:00–20:00 failed. 41 execute errors, 20 snapshot errors, 13 lastKnownSoc fallback activations.
+- **Pattern**: ETIMEDOUT clusters then EHOSTUNREACH at 09:15 and 16:30. Datalogger (192.168.1.180) lost network at layer 3, not just rate limited.
+- **Effect**: Approximately 48 execute cycles missed (08:00–19:45). Inverter held at last-written discharge floor (20%). Battery continued operating in load-first mode autonomously. No schedule commands were applied during this window.
+- **Recovery**: Partial — energy_snapshots show data resuming ~11:30–11:45 (Modbus reads working again), but execute remained failing through 19:46 restart. Full recovery after 19:46 config.js restart.
+- **Root cause hypothesis**: Datalogger rebooted or lost DHCP lease. Router may have reassigned 192.168.1.180. The EHOSTUNREACH signals the router knew the device was gone (not just slow).
+- **Note on impact**: During outage, inverter was in "discharge" mode (floor=20%) from last write. Battery continued discharging normally overnight and into morning. No operational catastrophe.
+- **Status**: Recurring pattern — similar outages on 2026-03-25 (8h+) and shorter bursts on prior days. Datalogger appears to randomly lose network. Consider static IP assignment for 192.168.1.180.
+
+## Issue: Dawn pre-charge RESOLVED — dawn_soc_penalty set to 0 (confirmed 2026-05-10 and 2026-05-11)
+- **Status: RESOLVED**. With dawn_soc_penalty=0 (commit 24fb4cb), zero charge_grid slots appeared on May 10 or May 11. No expensive dawn pre-charge events observed.
+- Prior behavior: penalty=0.3 (May 5–6) and penalty=0.1 (May 7) both produced dawn charge_grid at 0.94–1.30 SEK.
+- Disable (=0) is the correct fix. No side effects observed — battery naturally idles overnight without the recharge.
+
+## Issue: Dawn pre-charge at high price — penalty reduction to 0.1 did not resolve (confirmed 2026-05-07)
+- **Status updated**: dawn_soc_penalty reduced from 0.3 to 0.1 (applied before May 7). The dawn charge_grid STILL APPEARED on May 7 at 05:15 price=1.2972 SEK (HIGHER than May 5–6 at 0.94–0.97 SEK with penalty 0.3). Pattern persists.
+- **New hypothesis**: The dawn recharge is not primarily driven by the penalty — it may be driven by a minimum SOC constraint at solar ramp-up time. Even with penalty=0.1, the optimizer sees a benefit in having some buffer before solar output begins at 07:00–08:00.
+- **What to try next**: Consider `charge_grid_max_buy_price` cap (if config supports it), or raise `min_soc` from 10 to 20 so the floor is already above where dawn recharge targets.
+
+## Issue: Dawn pre-charge at high price driven by dawn_soc_penalty (confirmed recurring 2026-05-05 and 2026-05-06)
+- **What**: Every night the optimizer discharges battery to floor (10–20% SOC), then inserts a charge_grid slot at dawn (~06:00) at prices 0.94–0.97 SEK/kWh (expensive). This creates a "drain to floor then top-up at high price" pattern.
+- **Root cause**: dawn_soc_penalty: 0.3 penalises holding SOC overnight, making it cheaper to discharge and recharge at dawn even at high prices. On expensive-overnight-price days, the optimizer correctly discharges. But the dawn charge_grid then kicks in at whatever dawn price exists, which is also expensive.
+- **Effect**: ~0.74–1.45 kWh of grid import at 0.94–1.36 SEK = 0.70–1.97 SEK cost that could be avoided if optimizer held 15–20% SOC overnight instead.
+- **May 6 special case**: A second charge_grid slot at 07:45 (price 1.36 SEK, 265W) appeared — likely a replan artefact when SOC drifted below plan mid-morning before solar was sufficient.
+- **Status**: Configuration issue to investigate. Lowering dawn_soc_penalty from 0.3 to 0.1–0.2 may reduce the dawn pre-charge frequency. Alternatively, raising soc_replan_min_soc above 20 or setting a charge_grid_max_buy_price would cap the dawn-charge price.
+
 ## Issue: Cloud-irradiance cap fires but is insufficient on high-diffuse May days (first observed 2026-05-01)
 - **What**: The cloud-irradiance cap (enabled: true, cloud_pct_threshold: 30, irr_wm2_threshold: 400, cap_factor: 0.45) fired at 11:00, 12:00, and 13:00 on May 1. The cap constrained forecast to 1.94/2.20/2.36 kWh respectively — but actual production was 5.1/5.6/5.9 kWh. The cap helped slightly but the forecast was still 2.5–3× too low.
 - **Root cause**: May 1 had 45–93% cloud cover during the midday peak, yet actual production was extremely high — consistent with a uniform diffuse overcast that lets through 70–85% of GHI. Open-Meteo irradiance values underestimated this. The correction matrix has zero May samples, so no learned correction exists yet. The 0.45 cap factor, combined with a POA-to-GHI physics baseline that's already underestimated, produces a bound that is still far below reality.

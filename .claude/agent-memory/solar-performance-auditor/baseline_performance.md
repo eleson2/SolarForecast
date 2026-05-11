@@ -212,6 +212,110 @@ type: project
 ## R² Improvement Note (2026-04-30)
 - R² jumped from 0.079 (Apr 13) to 0.214 (Apr 30). This is a meaningful improvement, driven by more samples (638 vs 455) covering more seasonal variety. Model is learning. WARN continues to fire but is increasingly less concerning.
 
+## Solar Forecast Accuracy Baselines (2026-05-06 to 2026-05-07)
+- May 6 (clear day, confirmed): Total actual 48.0 kWh. Total forecast 51.9 kWh. Ratio 0.92x. MAE 0.368 kWh/h (15 active hours). MAPE 24.4%. 3 hours >30% (07:00 +144%, 18:00 +40%, 20:00 -39%). Outstanding accuracy for midday (09:00–14:00 all within 10%).
+- May 7 (variable cloud day): Total actual ~47.4 kWh (inverter pv_today), forecast ~35–38 kWh estimated. Model significantly under-forecast due to cloud_cover 60–88% in afternoon while actual PV was very high — classic high-diffuse May pattern. Solar readings show prod_actual=11.5 kWh at 13:00 (correction=2.19x), 6.8 kWh at 15:00 (cloud_cover=60%), 4.5 kWh at 16:00 (cloud_cover=88%). The correction matrix did not have enough May samples to anticipate this.
+- Persistent over-forecast pattern at 15:00–17:00 (mountain shadow earlier than model predicts): 0.5–0.8 kWh excess each hour. Expected and documented site behaviour.
+- Dawn (06:00) consistently forecasts 0.11–0.12 kWh but actual is 0 kWh. Not a bug — panel not yet illuminated at this sun angle.
+
+## Solar Forecast Accuracy Baselines (2026-05-05 and 2026-05-06 — clear days, strong production)
+- May 5: Total actual 44.0 kWh (solar_readings sum) / 47.1 kWh (inverter pv_today). Total forecast 50.68 kWh. Ratio 0.87× (model slightly over-forecasts on clear days).
+- May 5: MAE 0.528 kWh/h across 13 active hours with prod_actual>0. MAPE 23.6%. 3 hours >30% deviation (06:00 miss=dawn, 16:00 mountain shadow, 20:00 twilight residual).
+- May 6: Total actual 48.0 kWh (partial, prod_actual missing 21:00+) / 48.0 kWh (inverter). Total forecast 51.90 kWh. Ratio 0.92× (good day, model close).
+- May 6: MAE 0.386 kWh/h across 14 active hours. MAPE 24.4%. 3 hours >30% deviation (same pattern as May 5: dawn, 18:00 mountain shadow, 20:00 twilight).
+- Both days showed consistent over-forecast of ~0.5–0.8 kWh at 15:00–17:00 (mountain shadow earlier than model predicts).
+- 06:00 dawn hour: model forecasts 0.11–0.12 kWh but actual is 0 kWh — correction=0. Expected: panel not yet illuminated. Not a system failure.
+- Recency bias stable at 1.13–1.14× on these clear days (well within normal range, no clamping).
+- Correction matrix (May day=6): only 1 sample per hour cell. Smooth matrix uses Gaussian-blended May neighbours. Both still young.
+
+## Battery Schedule — Dawn SOC Penalty and Overnight Discharge (2026-05-05)
+- Starting SOC: 71% at 00:00.
+- May 5 overnight prices: 0.28–1.29 SEK/kWh — expensive throughout, no cheap window. Minimum was 0.2825 at 01:45.
+- Optimizer scheduled ALL-NIGHT discharge (49 slots) draining from 71% to floor, with only 1 charge_grid slot at 06:00 (price 0.9651 SEK).
+- dawn_soc_penalty: 0.3 (configured). This penalises holding SOC overnight to incentivise discharging before solar arrives.
+- SOC hit 19% at 04:00 (planned 31.2%): EV charging at night caused faster drain (01:00 and 02:00 marked inverter_delta_ev, consumption 1075–1575W above baseline).
+- SOC deviation guard fired twice: (1) 00:45 — actual 40% vs planned 49.8% (−10%), SOC≥30%, triggered replan. (2) 02:00:15 — actual 19% vs planned 31.2% (−12%), SOC<30%, forced charge_grid.
+- After 02:00 charge_grid (SOC recovered to ~30%), battery continued discharging to floor again by 04:00 (EV still active).
+- At 04:00 the schedule scheduled another charge_grid at 06:00 (price 0.9651 SEK) — this is the dawn pre-charge pattern.
+- Grid import May 5: 6.1 kWh. Grid export May 5: 28.3 kWh (enormous — battery was 100% all afternoon with strong PV).
+- SOC reached 100% by 12:15 on solar alone (solar surplus: PV ~5.7–6.5 kWh/h with low load ~300–500W).
+- Battery remained at 100% from 12:15 through 19:45. All export was passive PV spillover.
+- Mean absolute SOC deviation May 5: 4.70% across 92 paired slots. Normal.
+- Notable positive deviations: 11:45 (+36%), 12:00 (+44%), 12:15 (+50%) — solar charged much faster than plan expected (plan held at 50% due to solar under-forecast).
+
+## Battery Schedule — May 6 Dawn Charge_Grid at Expensive Prices (ANOMALY)
+- Starting SOC: 66% at 00:00 (battery at 70% from previous day, still discharging as of midnight).
+- May 6 overnight prices: 0.81–1.29 SEK/kWh — uniformly expensive. No cheap overnight window. Avg 1.157 SEK/kWh (highest overnight average in dataset).
+- Optimizer scheduled overnight discharge 00:00–05:30, SOC fell 66% → 19% by 05:30. Correct given high prices.
+- ANOMALY: charge_grid at 06:00 (price 0.9408 SEK, 5805W, SOC plan 20→28.7%) and 07:45 (price 1.3593 SEK, 265W, SOC plan 20→20.4%).
+  - The 06:00 charge_grid is the dawn_soc_penalty pre-charge. At 0.94 SEK this is expensive but may reflect the dawn_soc_penalty incentivising a charge before solar begins.
+  - The 07:45 charge_grid (1.36 SEK, 265W) is unusual — a tiny partial charge at the day's most expensive morning price. Likely a replan artefact triggered by SOC deviation at 07:30 (actual SOC drifting below plan during morning).
+- Grid import May 6: 5.6 kWh (by 21:15). Export: 30.7 kWh.
+- SOC reached 100% by 12:00, remained at 100% through 18:45. Strong export window.
+- Mean absolute SOC deviation May 6: 3.94% across 77 paired slots. Excellent.
+- 11 slots with >=8% deviation, all positive (actual above plan) during 08:00–12:15 — solar charging faster than plan expected.
+
+## Sell Shadow — Significant Missed Revenue (2026-05-05 and 2026-05-06)
+- sell_enabled: false (current config). sell_price_factor: 0.80.
+- May 5 sell shadow: +14.79 to +25.02 SEK extra throughout the day. Peaked at +24.75 SEK extra at 17:30 after battery hit 100%.
+- May 6 sell shadow: +18.89 to +27.62 SEK extra throughout the day.
+- Sell mode is disabled — this is intentional. But the shadow consistently shows significant unrealised value when battery is at 100% and strong PV export is occurring.
+- Key: these are passive export-only days (battery 100%, load-first architecture). Sell mode would allow LP optimizer to plan export more explicitly and potentially capture sell_price_factor × spot_price revenue.
+
+## Price Optimisation Patterns (SE3, 2026-05-05 and 2026-05-06)
+- May 5: price range 0.2825–1.4666 SEK/kWh. Average 0.814 SEK/kWh. No cheap overnight window (floor 0.28 at 01:45 is marginally cheap but not like typical 0.05–0.10 cheap windows).
+- May 6: price range 0.7460–1.7943 SEK/kWh. Average 1.157 SEK/kWh. All slots above 0.74 — exceptionally expensive day.
+- Both days: optimizer correctly discharged battery overnight (prices > daytime midday marginal cost of solar), held idle during export window (100% SOC + PV surplus), discharged in evening.
+- Dawn pre-charge slots at high prices (0.94–1.36 SEK) are driven by dawn_soc_penalty: 0.3. The penalty makes holding SOC overnight costly, so battery discharges to floor then charges a small amount at dawn to have minimum buffer for morning load.
+- LP optimizer savings estimate May 6: 21.4–22.02 SEK (very stable all day, reflecting a high and flat price curve with excellent solar).
+
+## Modbus / Hardware Observations (2026-05-05 and 2026-05-06)
+- May 5 total Modbus error events: ~8 distinct events.
+  - 05:15: ETIMEDOUT cluster (4 unhandled), snapshot pipeline error, ECONNRESET.
+  - 09:15: execute Timed out, transient flag set.
+  - 10:00: fetch Open-Meteo 504 (1st attempt, retried successfully).
+  - 13:45: 3 ETIMEDOUT + snapshot timeout (execute recovered next cycle).
+- May 6 total Modbus error events: ~11 distinct events.
+  - 08:30: execute Timed out, transient flag.
+  - 08:45: ETIMEDOUT cluster (4 unhandled), snapshot pipeline error.
+  - 11:15: execute Timed out + lastKnownSoc fallback activated (used 100%) — batteryPipeline used last known SOC for optimization.
+  - 11:45: ETIMEDOUT + execute Timed out + ECONNRESET cluster.
+  - 16:00: ETIMEDOUT + execute TCP timeout + ECONNRESET cluster.
+  - 16:00: Open-Meteo 504 (1st attempt, retried successfully — fetchPipeline completed ok).
+- lastKnownSoc fallback activated May 6 at 11:15: used 100%. This is actually the correct value (battery was at 100% all afternoon). Harmless.
+- dry_run: false. All commands live.
+- No "Illegal function" errors.
+- Snapshot count May 5: ~88 of 96 (missing: 05:30, 07:15, 11:15, 15:45 — null SOC entries from timeouts).
+- Snapshot count May 6: ~93 of 96 (missing/null: 10:30, 13:15, 13:45, 18:00 — null SOC).
+
+## Known Dawn Charge_Grid Pattern — Updated after dawn_soc_penalty change to 0.1 (2026-05-07)
+- With dawn_soc_penalty: 0.3 (May 5–6): charge_grid at 06:00, price 0.94–0.97 SEK. Battery drained to 18–19% then charged at dawn.
+- With dawn_soc_penalty: 0.1 (May 7 onward): charge_grid moved to 05:15 at 1.2972 SEK, 4768W. Battery still drained to ~23% by 04:00 and still recharged at dawn — the pattern PERSISTS but the timing shifted earlier. The penalty reduction did NOT eliminate the dawn charge; the optimizer still concluded that a pre-solar charge was needed. The dawn floor SOC (~23%) is similar to prior behaviour (~18–20%).
+- KEY FINDING (2026-05-07): dawn_soc_penalty=0.1 did not meaningfully change the "drain overnight, charge at dawn" pattern. The optimizer chose a HIGHER price dawn recharge (1.30 vs 0.94 SEK) than with 0.3 penalty. This may be because the constraint forcing minimum SOC at solar start is binding regardless of penalty level.
+- A second charge_grid appeared on May 7 at 14:00 (price 1.100 SEK, 3436W) — this is a day-ahead replan mid-afternoon, adding charge as solar declined. Different from the dawn pre-charge pattern.
+- Conclusion: dawn_soc_penalty tuning alone may not fix the expensive dawn recharge. Consider instead: min_soc higher (25–30%), or a hard constraint on charge_grid_max_price.
+
+## Modbus / Hardware Observations (2026-05-07 — CRITICAL SUSTAINED OUTAGE)
+- Total Modbus error events May 7: 175 (vs 11 on May 6 — 16x higher). This is the highest error count in the dataset.
+- SUSTAINED OUTAGE 08:00–20:00 (approx 12h): Every execute cycle failed. 41 execute failures, 20 snapshot failures, 13 lastKnownSoc activations.
+- Error pattern: ETIMEDOUT clusters (8–10 errors per 15-min cycle), ECONNRESET, EHOSTUNREACH at 09:15. Characteristic of datalogger network layer failure — not just rate limiting.
+- 1 EHOSTUNREACH at 09:15 (host unreachable at network layer) and 1 at 16:30 (execute EHOSTUNREACH + reset also failed). Strong signal that the datalogger lost network connectivity.
+- lastKnownSoc fallback used: 08:30→35%, 09:30→55%, 10:30→83%, 11:15→83%, 11:30→83%, 12:30→100%, 13:30→100%, 14:30→100%, 15:30→100%, 16:30→100%, 17:30→100%, 18:30→96%, 19:30→92%. 13 activations in sequence.
+- Recovery visible in energy_snapshots: inverter data resumed appearing ~11:45 (SOC=83, from 11:30 null). But execute continued failing through 19:00+.
+- 1 ERR_STREAM_WRITE_AFTER_END error at 00:30 (non-fatal, batteryPipeline completed ok).
+- 2 snapshot null-rows at 04:15 and 08:15.
+- 1 config.js restart at 19:46 (user action). Triggered extra battery+fetch+execute runs.
+- All execute failures were transient-flagged — inverter left in last-written state (discharge floor = 20%). During the outage window, the inverter continued normal operation at last-set floor.
+- Connectivity before 08:00: fully healthy (execute success every cycle 00:00–07:45).
+- dry_run: false. All commands live.
+
+## Solar Correction Matrix State (May 2026)
+- As of 2026-05-07: May cells now have 2–3 samples each. May 7 actuals show high corrections (13:00=2.19, 15:00=1.96, 16:00=1.92) from the high-diffuse afternoon. These will update the smooth matrix.
+- As of 2026-05-06: May cells have 1 sample each (hours 06:00–18:00 populated by May 5 and May 6 actuals).
+- Smooth matrix uses Gaussian-blended neighbours — 3–7 samples per May hour cell.
+- Correction values for May 6 day=6: hour 8=0.84, 9=1.02, 10=1.02, 11=0.92, 12=0.91, 13=0.99, 14=1.10, 15=0.89, 16=0.85, 17=0.85, 18=0.72. Generally close to 1.0 (model well-calibrated for clear days in May). The 18:00 correction (0.72) reflects mountain shadow cutting afternoon production.
+- Hours 06:00 and 07:00 have corrections of 0.0 and 0.41 — these are dawn hours where the panel barely produces (actual ~0.0 and 0.3 kWh vs forecast 0.12 and 0.73 kWh). Expected — the sun rises but is still below effective angle.
+
 ## Solar Forecast Accuracy Baselines (2026-05-01 — variable cloud/clearing day, high production)
 - Cloud cover: 45% at 07:00, mixed/clearing morning (1–4% at 08:00–09:00), cloudy 10:00–13:00 (45–93%), clearing rapidly 14:00–17:00 (0–20%), light evening cloud.
 - Total actual production: 46.30 kWh (daily cumulative from energy_snapshots). Total forecast: 38.70 kWh. Ratio 1.20× (model under-forecasted on this high-production day — May is first-year data for the correction matrix).
@@ -269,3 +373,75 @@ type: project
 - Decline driven by high-temperature daytime hours (16–18°C) with LOW actual consumption (600–900W) — temperature model predicts ~840–900W at those temps but actual was also low, so not a contradiction. The variance is in the EV-charging and high-load hours.
 - Slope declining day over day: -108 → -96 W/°C. Temperature sensitivity weakening as more warm-weather low-consumption data is added.
 - WARN fires every hour — expected and acceptable. Not actionable.
+
+## Solar Forecast Accuracy Baselines (2026-05-10 — heavy overcast day with mystery afternoon clearing)
+- Cloud cover: variable — 88% at 06:00, falling to 14–27% at 08:00 and 16:00, spiking 92–100% 10:00–14:00, then clearing to 2–15% for 16:00–19:00.
+- Total actual production (energy_snapshots): 35.8 kWh. Total forecast (solar_readings, 15 active hours): 28.76 kWh. Ratio 1.24× (model under-forecasted overall).
+- MAE: 1.293 kWh/h across 15 active hours. MAPE: 57.4% (dominated by large under-forecasts in the cloudy midday peak).
+- 11 of 15 active hours showed >30% deviation.
+- Most severe under-forecasts: 13:00 (forecast 0.845 kWh, actual 4.9 kWh, +480% — cloud_cover=100% yet actual output extremely high, correction_factor=5.8×). This is the classic high-diffuse overcast paradox: 100% cloud cover does NOT mean low output in May.
+- After-noon over-forecast: 16:00 (6.32 → 4.70 kWh, −25.6%), 17:00 (5.93 → 3.60, −39%), 18:00 (3.66 → 2.20, −40%). Mountain shadow + cloud combined. Expected site behaviour.
+- 10:00–14:00: cloud_cover 92–100% yet actuals 3.2–4.9 kWh/h vs forecasts 0.84–1.57 kWh/h. Correction matrix is learning (corrections 2.04–5.80×) but intra-day scalars only reached 1.54–1.63× (clamped by intraday_scalar_max=3.0 at upper end).
+- Battery was full (100% SOC) by 13:45 and remained full through 19:00. SOC correction that caused fast charging from 34%→100% in 08:30–13:30 was entirely solar-driven.
+- No charge_grid slots on May 10 — dawn_soc_penalty=0 (disabled as of this commit) confirmed to have ELIMINATED the dawn pre-charge pattern entirely.
+
+## Battery Schedule & SOC (2026-05-10 — discharge-then-idle-then-passive-export day)
+- Starting SOC at 00:00: 66% (from previous day's discharge strategy).
+- May 10 strategy: discharge 00:00–08:30 (from 66% to 34%), then idle/solar-charge 08:30–13:30 (SOC 34% to 100%), then idle at 100% through 19:00 (passive export), then discharge 19:00–23:45 (100% → 70%).
+- All schedule actions were discharge or idle. Zero charge_grid slots — dawn_soc_penalty=0 effect confirmed.
+- Mean absolute SOC deviation: 2.78% across 95 paired slots. Excellent adherence.
+- 5 slots with ≥8% deviation: all POSITIVE (actual above plan) during 08:00–13:15. Solar charged faster than LP model expected (under-forecast mid-morning). Largest: +13% at 11:15 (actual 65% vs plan 52%). Harmless positive overshoot.
+- No SOC deviation guard activations.
+- No manual overrides.
+- Grid import May 10: 3.5 kWh (small — idle/discharge overnight, no charging). Grid export May 10: 16.9 kWh (huge passive export window 13:45–19:30 at 100% SOC with strong PV).
+- Total PV May 10: 35.8 kWh. Total load: 22.3 kWh.
+- Peak export rate: confirmed >1.0 kWh/15min window around 15:30–16:30, consistent with 4.0 kW grid export limit in summer peak_shaving config (import=12 kW, export=11 kW for Apr–Sep).
+- LP optimizer savings estimate: stable at ~19 SEK throughout day.
+- Sell shadow peak on May 11: +13.89 SEK extra (sell_enabled=false). Significant unrealised sell revenue continuing.
+
+## Battery Schedule & SOC (2026-05-11 — partial day up to 18:00, overcast/cloudy with high production)
+- Starting SOC at 00:00: 70% (from May 10 end-of-day discharge).
+- May 11 strategy: idle 00:00–05:15 (SOC drifting 70%→63% from grid covering load), discharge 05:30–08:45 (63%→47%), charge_solar 09:00–09:15 (47%→48%), idle 09:30 onward once solar surplus built. SOC reached 100% by 12:30 on solar alone.
+- Battery at 100% from 12:30 through at least 18:00. Passive export ongoing.
+- 4 slots with ≥8% deviation on May 11: all POSITIVE at 11:00–12:15 (+8% to +18%), again solar charging faster than plan expected.
+- No SOC deviation guard activations as of 18:00.
+- EV charging detected at 11:00 (source=inverter_delta_ev, 11275W). Auto-charge not triggered (solar was active). Normal behaviour.
+- Grid import May 11 (up to 18:00): 4.8 kWh (all overnight from idle strategy drawing grid to cover house load).
+
+## Price Optimisation Patterns (SE3, 2026-05-10 and 2026-05-11)
+- May 10: price range 0.098–1.239 SEK/kWh. Avg: 0.699 SEK/kWh. Mixed day — cheap midday 08:45 (0.148) and 10:00–12:45 (0.098–0.292), expensive evening 20:00–23:00 (1.01–1.24 SEK).
+- May 10: optimizer correctly: discharged morning (68%→34% by 08:30 at 0.80–0.96 SEK), switched to idle at 08:30 as prices dropped (0.56/0.15 SEK at 08:30/08:45 — those are the cheapest slots), held idle through solar charging at midday low prices (0.10–0.16 SEK), then discharged again 19:00+ at 1.0–1.24 SEK.
+- May 10: brief anomaly at 08:30 — battery schedule switched from discharge (at 0.925 SEK) to idle at price 0.564 SEK (next slot). This is correct — optimizer recognised prices dropped sharply and correctly stopped discharging.
+- May 11: price range 0.978–1.801 SEK/kWh. Avg: 1.214 SEK/kWh. Very expensive day — floor nearly 1.0 SEK. All slots >0.97 SEK. No cheap window for grid charging.
+- May 11: optimizer correctly: avoided all grid charging (no charge_grid slots all day), preferred idle/discharge strategy. Discharging overnight at 1.0–1.4 SEK was correct given battery was partially full.
+- May 11: discharge from 05:30 at 1.18 SEK and rising to 1.80 SEK at 08:00 — optimizer front-loaded discharge during expensive morning window.
+- May 12 prices: 96 slots loaded in DB (day-ahead fetched at 11:15 when elprisetjust returned 200). Day-ahead re-optimization triggered correctly at 11:15.
+
+## Modbus / Hardware Observations (2026-05-10 and 2026-05-11 up to 18:00)
+- May 10 total Modbus error events: 2 (minimal day).
+  - 04:30: batteryPipeline SOC read timed out — lastKnownSoc fallback used 41%. Harmless (optimizer used conservative SOC).
+  - 08:45: ECONNRESET unhandled (non-fatal). Execute succeeded nearby.
+- May 10 snapshot count: 96/96 expected. 1 null SOC entry (01:30). Excellent hardware day.
+- May 11 total Modbus error events: 9 distinct error events (elevated but manageable).
+  - 00:30: ERR_STREAM_WRITE_AFTER_END ×2 + execute Timed out + lastKnownSoc 63%.
+  - 01:30: ETIMEDOUT ×3 + ECONNRESET + execute TCP timeout (full execute failure for this cycle).
+  - 09:30: snapshot TCP timeout (execute succeeded — batteryPipeline got SOC from execute path instead).
+- May 11 snapshot count: 73/~72 expected as of 18:00. Null SOC: 3 (02:30, 03:30, 18:03).
+- 18:03 null SOC at "2026-05-11T18:03" is from the config.js restart-triggered snapshot — non-standard timestamp (not on 15-min boundary). Not a genuine missing slot.
+- lastKnownSoc activated May 11 at 00:30 (used 63%) and indirectly at 01:30 via batteryPipeline fallback.
+- dry_run: false. All commands live.
+- No "Illegal function" errors.
+- Peak shaving: import=12 kW, export=11 kW (correct Apr–Sep summer range).
+- 1 config.js restart at 16:03 on May 11 (user action). Triggered extra fetch, battery, execute, and consumption runs. Snapshot at 16:03 created boundary offset pair warning at 14:05 and 15:05 (two :05 runs surrounding the restart).
+
+## dawn_soc_penalty=0 Effect (confirmed 2026-05-10 and 2026-05-11)
+- With dawn_soc_penalty: 0 (disabled as of commit 24fb4cb): ZERO charge_grid slots on either day. The optimizer is no longer pre-charging at dawn.
+- Contrast with prior behavior: May 5 (penalty=0.3) and May 7 (penalty=0.1) both had dawn charge_grid at 0.94–1.30 SEK.
+- Battery on May 11 stayed in idle mode overnight (63%→60% natural drift) without a dawn recharge, then solar took over. No high-price grid charging event.
+- This confirms dawn_soc_penalty=0 is the correct fix for the expensive dawn pre-charge issue.
+
+## Consumption Model (2026-05-11)
+- n=736, R²=0.184, slope=-91 W/°C, intercept=2285 W. EV exclusions: 22 readings.
+- EV detected at 11:00 (11275W source=inverter_delta_ev). EV exclusion count rose from 13 (May 1) to 22 by May 11 — EV charging events accumulating in dataset.
+- R²=0.184 is slightly below the Apr 30 peak of 0.214 — expected as more variable warm-weather data added. Still above the early 0.06–0.08 baseline.
+- Recency bias: 1.404–1.424 throughout May 11 (stable, moderate — the intra-day scalar is learning the overcast=high-output pattern for May).
