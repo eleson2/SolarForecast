@@ -214,8 +214,17 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     const limits = resolvePeakShavingLimits(psConfig, slotTs);
     return limits ? limits.import_kw * 1000 : bat.max_charge_w;
   }
+  // Export cap per slot — uses export_kw from the matching peak shaving date range/schedule,
+  // falling back to grid.max_export_w (static config) or Infinity when no limits resolve.
+  function peakShavingExportW(slotTs) {
+    const limits = resolvePeakShavingLimits(psConfig, slotTs);
+    if (limits) return limits.export_kw * 1000;
+    return grid.max_export_w ?? Infinity;
+  }
   if (psConfig?.enabled) {
-    console.log(`[optimizer-lp] Peak shaving enabled — seasonal date-range import caps apply`);
+    console.log(`[optimizer-lp] Peak shaving enabled — seasonal date-range import/export caps apply`);
+  } else if (isFinite(grid.max_export_w ?? Infinity)) {
+    console.log(`[optimizer-lp] Export cap: ${grid.max_export_w / 1000} kW (static config fallback)`);
   }
 
   // EV: when enabled, consumption_watts is house-only so maxDis is bounded to house load.
@@ -223,14 +232,6 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   // the optimizer does not attempt to predict EV load for the maxCgW bound.
   if (config.ev?.enabled) {
     console.log(`[optimizer-lp] EV-aware: battery discharge bounded to house load only (EV draws from grid)`);
-  }
-
-  // Export cap (W) — limits total grid injection per slot (solar overflow + battery sell).
-  // Used to enforce peak-power tariff compliance in both directions.
-  // Infinite when not configured (no constraint added).
-  const exportCapW = grid.max_export_w ?? Infinity;
-  if (isFinite(exportCapW)) {
-    console.log(`[optimizer-lp] Export cap: ${exportCapW / 1000} kW — will plan pre-emptive discharge to avoid solar clipping`);
   }
 
   // ── 3b. Forward-feasibility ceiling (stranded SOC) ──────────────────────────
@@ -309,10 +310,10 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
   // Clip penalty: each watt of clipped solar costs its sell value (lost export revenue).
   // Only meaningful when sell is enabled and the price is positive — otherwise there's no
   // revenue incentive and the LP can't avoid clipping anyway (sell_t = 0).
-  if (effectiveSellEnabled && isFinite(exportCapW)) {
+  if (effectiveSellEnabled) {
     for (let t = 0; t < N; t++) {
       const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
-      if (surplusW > 0 && slots[t].sell_price > 0) {
+      if (surplusW > 0 && slots[t].sell_price > 0 && isFinite(peakShavingExportW(slots[t].slot_ts))) {
         const coeff = (slots[t].sell_price * h / 1000).toFixed(8);
         objLines.push(`+${coeff} clip_${t}`);
       }
@@ -373,19 +374,19 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
       constrLines.push(`  jd_${t}: d_${t} + sell_${t} <= ${bat.max_discharge_w.toFixed(4)}`);
     }
   }
-  // Export cap: net grid injection (solar overflow + battery sell) must not exceed export limit.
-  // solar_surplus − cs_t + sell_t − clip_t ≤ max_export_w
-  // → -cs_t + sell_t - clip_t ≤ max_export_w - solar_surplus_t
+  // Export cap: net grid injection (solar overflow + battery sell) must not exceed the
+  // per-slot export_kw limit from peak shaving config (or grid.max_export_w as fallback).
+  // solar_surplus − cs_t + sell_t − clip_t ≤ exportCap_t
+  // → -cs_t + sell_t - clip_t ≤ exportCap_t - solar_surplus_t
   // clip_t is a slack that absorbs unavoidable overflow (e.g. battery already full).
   // The penalty in the objective ensures the LP minimises clipping wherever possible.
-  if (isFinite(exportCapW)) {
-    for (let t = 0; t < N; t++) {
-      const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
-      if (surplusW > 0) {
-        const rhs = (exportCapW - surplusW).toFixed(4);
-        const sellTerm = effectiveSellEnabled ? ` + sell_${t}` : '';
-        constrLines.push(`  ec_${t}: - cs_${t}${sellTerm} - clip_${t} <= ${rhs}`);
-      }
+  for (let t = 0; t < N; t++) {
+    const capW = peakShavingExportW(slots[t].slot_ts);
+    const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
+    if (isFinite(capW) && surplusW > 0) {
+      const rhs = (capW - surplusW).toFixed(4);
+      const sellTerm = effectiveSellEnabled ? ` + sell_${t}` : '';
+      constrLines.push(`  ec_${t}: - cs_${t}${sellTerm} - clip_${t} <= ${rhs}`);
     }
   }
 
@@ -409,17 +410,17 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     boundLines.push(`  ${minSocWh.toFixed(4)} <= s_${t} <= ${maxSocWh.toFixed(4)}`);
   }
   // Decision variable bounds
-  const maxExportW = effectiveSellEnabled ? (grid.max_export_w ?? bat.max_discharge_w) : 0;
   for (let t = 0; t < N; t++) {
-    const maxDis = Math.min(bat.max_discharge_w,
-                            Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
-    const maxSol = Math.min(bat.max_charge_w,
-                            Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
+    const capW    = peakShavingExportW(slots[t].slot_ts);
+    const maxDis  = Math.min(bat.max_discharge_w,
+                             Math.max(0, slots[t].consumption_watts - slots[t].solar_watts));
+    const maxSol  = Math.min(bat.max_charge_w,
+                             Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
     const psLimitW = peakShavingImportW(slots[t].slot_ts);
     const priceOk  = bat.charge_grid_max_buy_price == null || slots[t].buy_price <= bat.charge_grid_max_buy_price;
     const maxCgW   = priceOk ? Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts)) : 0;
     const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
-      ? Math.min(maxExportW, bat.max_discharge_w) : 0;
+      ? Math.min(isFinite(capW) ? capW : bat.max_discharge_w, bat.max_discharge_w) : 0;
     boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);
     boundLines.push(`  0 <= d_${t}  <= ${maxDis.toFixed(4)}`);
     boundLines.push(`  0 <= cs_${t} <= ${maxSol.toFixed(4)}`);
@@ -427,7 +428,7 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
       boundLines.push(`  0 <= sell_${t} <= ${maxSellW.toFixed(4)}`);
     }
     // clip_t: slack for solar that exceeds the export cap — bounded by the surplus available
-    if (isFinite(exportCapW)) {
+    if (isFinite(capW)) {
       const surplusW = Math.max(0, slots[t].solar_watts - slots[t].consumption_watts);
       if (surplusW > 0) {
         boundLines.push(`  0 <= clip_${t} <= ${surplusW.toFixed(4)}`);
@@ -474,11 +475,11 @@ End`;
   console.log(`[optimizer-lp] Solved: ${result.Status}, objective = ${result.ObjectiveValue.toFixed(4)} ${currency}`);
 
   // Log predicted solar clipping so the user can see when pre-emptive discharge is helping
-  if (isFinite(exportCapW)) {
+  {
     let totalClipWh = 0;
     for (let t = 0; t < N; t++) {
       const surplusW = slots[t].solar_watts - slots[t].consumption_watts;
-      if (surplusW > 0) {
+      if (surplusW > 0 && isFinite(peakShavingExportW(slots[t].slot_ts))) {
         totalClipWh += Math.max(0, result.Columns[`clip_${t}`]?.Primal ?? 0) * h / 1000;
       }
     }

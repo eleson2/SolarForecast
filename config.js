@@ -115,8 +115,8 @@ export default {
         // Verify reg 3038 with write-register.js before enabling — see battery-optimizer.md Phase 0.
         sell_enabled: false,
         sell_price_factor: 0.80,
-        // Maximum power the grid operator allows you to export (W).
-        // Confirmed at 4.0 kW for this installation via Growatt app.
+        // Fallback export cap (W) used only when peak_shaving is disabled or no limits resolve.
+        // When peak_shaving is enabled, export_kw from the matching date_range/schedule is used instead.
         max_export_w: 4000,
         transfer_import_kwh: 0.50,  // nätavgift import (SEK/kWh)
         transfer_export_kwh: 0.00,  // nätavgift export (SEK/kWh) — often 0
