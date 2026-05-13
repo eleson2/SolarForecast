@@ -61,3 +61,18 @@ export function calendarDayDistance(m1, d1, m2, d2) {
   const diff = Math.abs(a - b);
   return Math.min(diff, 365 - diff);
 }
+
+/**
+ * Returns the current 15-minute slot window as local timestamp strings.
+ */
+export function currentWindow(timezone) {
+  const now = new Date();
+  const currentSlot = new Date(now);
+  currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
+  const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    currentSlot,
+    fromTs: localTs(currentSlot, timezone),
+    toTs:   localTs(endSlot, timezone),
+  };
+}

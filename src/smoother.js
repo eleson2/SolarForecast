@@ -1,6 +1,7 @@
 import config from '../config.js';
-import { getReadingsForSmoothing, upsertSmooth } from './db.js';
+import { getReadingsForSmoothing, upsertSmooth, recordPipelineRun } from './db.js';
 import { parseTs, dayOfYear, doyToMonthDay, CALENDAR_DATES } from './timeutils.js';
+import log from './logger.js';
 
 const KERNEL_HALF_WIDTH = 7; // ±7 days
 const SIGMA = 3.0;           // Gaussian sigma in days
@@ -85,4 +86,14 @@ export function runSmoother() {
 
   console.log(`[smoother] Updated ${count} cells in correction_matrix_smooth`);
   return count;
+}
+
+export function runSmoothPipeline() {
+  try {
+    runSmoother();
+    recordPipelineRun('smooth');
+  } catch (err) {
+    log.error('smooth', 'Smooth pipeline error', err);
+    recordPipelineRun('smooth', 'error');
+  }
 }

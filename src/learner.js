@@ -1,6 +1,9 @@
 import config from '../config.js';
-import { getUnprocessedActuals, updateCorrection, getCorrectionCell, updateCorrectionMatrix } from './db.js';
+import { getUnprocessedActuals, updateCorrection, getCorrectionCell, updateCorrectionMatrix, recordPipelineRun } from './db.js';
 import { parseTs } from './timeutils.js';
+import { learnConsumptionModel } from './consumption-learner.js';
+import { runModel } from './model.js';
+import log from './logger.js';
 
 // Weight function: how much to trust a correction sample based on irradiance.
 // Uses a soft half-saturation curve: weight = irr / (irr + k).
@@ -95,4 +98,18 @@ export function runLearner() {
   const skippedMsg = skippedCloud > 0 ? `, skipped ${skippedCloud} high-cloud` : '';
   console.log(`[learner] Processed ${count} actuals${skippedMsg}`);
   return count;
+}
+
+export function runLearnPipeline() {
+  try {
+    runLearner();
+    learnConsumptionModel();
+    // Re-run the model for all future hours so that correction-matrix and
+    // recency-bias updates from the learner immediately flow into remaining-day forecasts.
+    runModel();
+    recordPipelineRun('learn');
+  } catch (err) {
+    log.error('learn', 'Learn pipeline error', err);
+    recordPipelineRun('learn', 'error');
+  }
 }

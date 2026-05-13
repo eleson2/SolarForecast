@@ -108,6 +108,13 @@ type: project
 - **New hypothesis**: The dawn recharge is not primarily driven by the penalty — it may be driven by a minimum SOC constraint at solar ramp-up time. Even with penalty=0.1, the optimizer sees a benefit in having some buffer before solar output begins at 07:00–08:00.
 - **What to try next**: Consider `charge_grid_max_buy_price` cap (if config supports it), or raise `min_soc` from 10 to 20 so the floor is already above where dawn recharge targets.
 
+## Issue: Grid export exceeding 4.0 kW max_export_w limit (recurring — May 1 and May 12)
+- **What**: energy_snapshots show grid export rate of 4.3 kW on May 1 (13:15) and 5.2 kW on May 12 (17:30 — worst case so far). These exceed the configured max_export_w=4000 limit.
+- **Context**: Max export config is enforced via peak shaving register 3308. Summer config sets export=11kW (not a grid constraint — user-chosen). The 4.0 kW limit in config.js max_export_w appears to be a separate software limit used by the LP optimizer for sell planning. The actual Modbus export register may be set to 11kW.
+- **Effect**: Grid export is occurring freely during 100% SOC + active PV windows. The 5.2 kW event suggests the peak shaving export register is NOT limiting to 4.0 kW.
+- **Risk**: If there are grid operator constraints in winter, this behavior could be problematic. In summer (current period), export is freely allowed by grid operator. No immediate operational harm.
+- **Status**: MONITOR — the discrepancy between max_export_w=4000 (software) and actual behavior (>5 kW exported) suggests the export limit register is not constraining output. Investigate register 3308 setting.
+
 ## Issue: Dawn pre-charge at high price driven by dawn_soc_penalty (confirmed recurring 2026-05-05 and 2026-05-06)
 - **What**: Every night the optimizer discharges battery to floor (10–20% SOC), then inserts a charge_grid slot at dawn (~06:00) at prices 0.94–0.97 SEK/kWh (expensive). This creates a "drain to floor then top-up at high price" pattern.
 - **Root cause**: dawn_soc_penalty: 0.3 penalises holding SOC overnight, making it cheaper to discharge and recharge at dawn even at high prices. On expensive-overnight-price days, the optimizer correctly discharges. But the dawn charge_grid then kicks in at whatever dawn price exists, which is also expensive.

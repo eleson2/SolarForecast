@@ -445,3 +445,63 @@ type: project
 - EV detected at 11:00 (11275W source=inverter_delta_ev). EV exclusion count rose from 13 (May 1) to 22 by May 11 — EV charging events accumulating in dataset.
 - R²=0.184 is slightly below the Apr 30 peak of 0.214 — expected as more variable warm-weather data added. Still above the early 0.06–0.08 baseline.
 - Recency bias: 1.404–1.424 throughout May 11 (stable, moderate — the intra-day scalar is learning the overcast=high-output pattern for May).
+
+## Solar Forecast Accuracy Baselines (2026-05-12 — heavy overcast, high-diffuse May day)
+- Cloud cover: 80–95% throughout the entire daytime period (06:00–20:00). Persistent thick overcast.
+- Total actual production (energy_snapshots): 24.8 kWh. Total forecast (solar_readings, 15 active hours): 18.23 kWh. Ratio 1.48x (model under-forecasts on heavy-overcast high-diffuse May days — consistent recurring pattern).
+- MAE: 1.080 kWh/h across 15 active hours. MAPE: 47.7% across 14 hours with prod_actual>0.05 kWh.
+- 11 of 15 active hours showed >30% deviation. Model consistently under-forecasts on heavy-overcast May days (diffuse light paradox).
+- Notable anomaly: 09:00 hour — prod_actual=0 stored in solar_readings, yet energy_snapshots show PV continuing to accumulate (2.1→2.4 kWh between 09:00 and 09:15). The zero is a data artefact from the 08:05 consumptionPipeline flat_fallback warning — the inverter daily counter reset mid-hour causing a near-zero delta read, substituted with flat_watts but PV=0. This is a known reading failure mode, not a real zero-production hour.
+- 10:00 hour: forecast 1.56 kWh, actual 5.0 kWh (+221%). Extreme correction_factor 3.20x. Highest single-hour under-forecast of the day. Cloud cover=95% yet production was extremely high (5.0 kWh/h) — extreme diffuse light event.
+- 14:00 hour: forecast 1.70 kWh, actual 4.3 kWh (+153%). Correction_factor 2.52x. Second-largest under-forecast.
+- Late afternoon (16:00–18:00): actual still 1.6–2.5 kWh/h despite 88–90% cloud cover. Model under-forecasts by 56–68%. Mountain shadow effect was expected but the high cloud cover masked it.
+- 20:00: forecast 0.021 kWh, actual 0.10 kWh. Twilight diffuse light production not in model. Expected site behaviour.
+- Recency bias: 1.437 at start of day, rising to 1.500 (capped) by evening as actuals exceeded forecasts. Bias rising but not clamping during daytime (raw ratio reaching 1.5x).
+- Correction matrix (May, day=12): learnPipeline updates from this day should pull May corrections higher for the 10:00–14:00 heavy-overcast window.
+
+## Battery Schedule & SOC (2026-05-12 — overnight discharge, solar-charge afternoon, passive export evening)
+- Starting SOC at 00:00: 59% (from prior day).
+- Strategy: Discharge overnight 00:00–07:45 (59%→30% by 07:45), transition to charge_solar 08:00–08:15 (29%→30%), idle 08:30–09:15, charge_solar 09:30–09:45, marginal discharge 10:00–10:15, idle 10:30–12:45, charge_solar 13:15–15:15 (57%→87% then 95%), idle 15:30–16:45 at 100% SOC (passive export window), marginal discharge 17:00–17:45, charge_solar 18:00, idle 18:15–18:45, discharge 19:00–23:45 (95%→71%).
+- Battery reached 100% SOC at 15:00 (actual 98%, plan 85.8% — the only deviation ≥8% for the day: +12.2%, positive overshoot). Solar charged faster than plan expected. Battery remained at 100% from 15:00–18:45.
+- Mean absolute SOC deviation: 1.70% across 93 paired slots. Outstanding adherence — best result in dataset so far.
+- Slots ≥8% deviation: 1 (at 15:00, positive overshoot, harmless). No negative deviations ≥8%.
+- No SOC deviation guard activations. No manual overrides. No config.js restarts.
+- Zero charge_grid slots — dawn_soc_penalty=0 confirmed to eliminate dawn pre-charge for the third consecutive day.
+- Grid import May 12: 4.1 kWh (overnight idle drawing grid to cover load — inverter idle means grid covers house). Grid export: 7.4 kWh (passive export 15:00–18:45 at 100% SOC).
+- Total PV May 12: 24.8 kWh. Total load: 20.1 kWh.
+- End-of-day SOC: 71% (from 23:45 snapshot). Battery in excellent state for May 13.
+- EV detected 3 times: 01:00 (1475W house-only), 05:00 (6575W house-only), 10:00 (10275W house-only — large EV charge event, 11.6 kWh load logged). All EV events correctly excluded from consumption model. EV exclusion count rose from 22 to 23.
+- Flat fallback at 09:00: consumptionPipeline substituted flat_watts=800W because the daily counter delta near midnight was near zero. PV=0 logged for this hour. Data artefact, not real.
+
+## Price Optimisation Patterns (SE3, 2026-05-12)
+- Price range May 12: 0.807–1.636 SEK/kWh. Average: 1.158 SEK/kWh. Uniformly high all day — no sub-0.80 prices anywhere. This is only the second day in the dataset with a floor above 0.80 SEK (after May 11 floor of 0.978 SEK).
+- No cheap overnight charging window. All 97 price slots between 0.807 and 1.636 SEK/kWh.
+- Peak evening: 19:30–21:00 at 1.51–1.64 SEK/kWh. Discharge correctly planned for this window.
+- LP optimizer correctly: discharged overnight (cost-effective given uniform high prices vs holding SOC), allowed solar to charge battery during the overcast-but-productive afternoon, then discharged again in the expensive evening.
+- Savings estimate ranged 7.32 SEK (07:30) to 25.73 SEK (17:30). Settled at 21–26 SEK from 12:30 onward once the solar-charged battery strategy locked in.
+- Sell shadow: largely +0.00 extra throughout the day. Peaked at +9.04 SEK at 09:30 (when battery was at 37–39% SOC and solar was active) but declined to +0.00 from 17:30 onward. Sell mode would have added modest value mid-morning. Not enabled.
+- Day-ahead prices for May 13: loaded at the first batteryPipeline run that checked (00:30). elprisetjust.nu returned 200 for May 13 from 00:30 onward. May 14 prices not yet available as of 23:30 (elprisetjust 404, nordpool 204 — normal).
+- Day-ahead re-optimisation (13:15 trigger): not visibly distinct — May 13 prices were available from 00:30 so every half-hour battery run had full tomorrow data. No separate day-ahead firing needed.
+
+## Modbus / Hardware Observations (2026-05-12)
+- Total distinct Modbus error events: 17 (three clusters of ~5–6 errors each, manageable compared to May 7's 175).
+- Cluster 1: 03:45–03:46 — ECONNRESET + snapshot TCP timeout + 2x ETIMEDOUT. Execute succeeded (03:46 timestamp slight delay). 1 null-entry snapshot at 03:45.
+- Cluster 2: 08:00–08:01 — ECONNRESET + snapshot TCP timeout + 2x ETIMEDOUT. Execute started at 08:00:37 (delayed by 37s) and succeeded. 1 null-entry snapshot at 08:00. consumptionPipeline at 08:05 returned flat_fallback for 09:00 due to near-zero delta (related to this cluster's timing impact on the inverter daily counter read).
+- Cluster 3 (worst): 12:15–12:16 — Snapshot "Timed out" + 5x ETIMEDOUT/ECONNRESET + execute TCP timeout → execute FAILED with transient flag. 1 execute cycle missed (12:15 slot). Inverter left in last-written state. Recovery by 12:30 (execute succeeded). 1 null-entry snapshot at 12:00 (null grid/pv fields).
+- Isolated event: 22:45 — 1x ETIMEDOUT (non-fatal, execute recovered).
+- Total execute failures: 1 (12:15 — transient flagged).
+- Total snapshot errors: 3 (03:45, 08:00, 12:15).
+- Null-SOC snapshots: 0 (all 98 snapshots had battery_soc populated — excellent).
+- Snapshot count May 12: 98 of expected 96 (2 extra from 00:00 prior-day rollover and 00:15 overlap). All 96 standard slots covered. Excellent.
+- No lastKnownSoc fallback activations during the May 12 window.
+- No "Illegal function" errors.
+- dry_run: false (all commands live).
+- Max grid export rate: 5.2 kW at 17:30 — EXCEEDS the 4.0 kW max_export_w limit. Warrants investigation (same issue flagged on May 1 at 4.3 kW — this is now 5.2 kW and above threshold more definitively).
+- Peak shaving registers not explicitly confirmed in May 12 logs (no peak_shaving log lines visible — confirms summer config import=12kW / export=11kW is still set).
+- Process restart: 2 restarts on May 13 at 05:38 and 05:39 (config.js edit). Outside the May 12 audit window but relevant for continuity.
+
+## Consumption Model (2026-05-12)
+- n=738→745, R²=0.19, slope=-91 to -93 W/°C, intercept=2287–2294 W. EV exclusions: 22→23 readings.
+- Large EV event at 10:00 (10275W) correctly excluded (inverter_delta_ev flag).
+- R² stable at 0.19 — not improving but not declining. Temperature model remains weak predictor.
+- Recency bias: 1.437 at midnight, 1.500 (max observed) by 20:00 and continuing through end of day. Bias at cap level means model's daily intra-day correction was being pushed to the ceiling.

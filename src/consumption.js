@@ -1,6 +1,16 @@
 import config from '../config.js';
-import { getConsumptionForRange, getDaytimeConsumptionModel } from './db.js';
+import {
+  getConsumptionForRange,
+  getDaytimeConsumptionModel,
+  upsertConsumption,
+  updateActual,
+  getSnapshotAtOrBefore,
+  getSnapshotsForRange,
+  recordPipelineRun
+} from './db.js';
 import { localTs } from './timeutils.js';
+import { getDriver, getDriverConfig } from './inverter-dispatcher.js';
+import log from './logger.js';
 
 const DAYTIME_START = 8;   // first hour covered by the temperature model (inclusive)
 const DAYTIME_END   = 18;  // last hour covered by the temperature model (inclusive)
@@ -158,4 +168,172 @@ export async function estimateConsumption(windowStart = null) {
   }
   console.log(`[consumption] Using flat estimate: ${config.consumption.flat_watts}W`);
   return estimates;
+}
+
+/**
+ * Derive last hour's energy consumption and PV production from the delta between
+ * the snapshot at the current hour start and the snapshot one hour prior.
+ */
+export async function runConsumptionPipeline() {
+  const driver = getDriver();
+  if (!driver) return;
+
+  const cfg = getDriverConfig();
+
+  // Fetch current outdoor temperature from Open-Meteo
+  let outdoorTemp = null;
+  try {
+    const { lat, lon } = config.location;
+    const url = `https://api.open-meteo.com/v1/forecast`
+      + `?latitude=${lat}&longitude=${lon}`
+      + `&current=temperature_2m`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      outdoorTemp = data.current?.temperature_2m ?? null;
+    }
+  } catch (err) {
+    log.warn('consumption', `Could not fetch outdoor temp: ${err.message}`);
+  }
+
+  // Derive last hour's energy from snapshots
+  // At HH:05 we compare snapshot at HH:00 vs (HH-1):00
+  const now = new Date();
+  const currentHour = new Date(now);
+  currentHour.setMinutes(0, 0, 0);
+  const prevHour = new Date(currentHour.getTime() - 60 * 60 * 1000);
+
+  const currentHourTs = localTs(currentHour, config.location.timezone);
+  const prevHourTs    = localTs(prevHour, config.location.timezone);
+
+  try {
+    const snapNow  = getSnapshotAtOrBefore(currentHourTs);
+    const snapPrev = getSnapshotAtOrBefore(prevHourTs);
+
+    if (snapNow && snapPrev) {
+      // Warn if nearest snapshot is far from the expected hour boundary
+      const snapNowAge  = Math.round(Math.abs(new Date(currentHourTs) - new Date(snapNow.snapshot_ts))  / 60000);
+      const snapPrevAge = Math.round(Math.abs(new Date(prevHourTs)    - new Date(snapPrev.snapshot_ts)) / 60000);
+      if (snapNowAge > 10 || snapPrevAge > 10) {
+        const spanMin = 60 + snapNowAge + snapPrevAge;
+        log.warn('consumption', `Snapshot boundary offset: now=${snapNowAge}min prev=${snapPrevAge}min — delta spans ~${spanMin}min instead of 60`);
+      }
+
+      // Compute deltas; handle midnight reset (daily counter drops back to 0)
+      const midnightReset = snapNow.load_today_kwh < snapPrev.load_today_kwh;
+      const deltaLoad = midnightReset
+        ? snapNow.load_today_kwh  // counter reset — value since midnight is the new reading
+        : snapNow.load_today_kwh - snapPrev.load_today_kwh;
+
+      const pvNow  = snapNow.pv_today_kwh  ?? 0;
+      const pvPrev = snapPrev.pv_today_kwh ?? 0;
+      const deltaPv = pvNow >= pvPrev ? pvNow - pvPrev : pvNow;
+
+      // Midnight-reset artefact: the first snapshot after midnight has accumulated only
+      // a few minutes of energy, making the delta for the 23:00 hour near-zero. Detect
+      // this and substitute flat_watts so the consumption model isn't corrupted.
+      const rawTotalW = deltaLoad * 1000;
+      if (midnightReset && rawTotalW < config.consumption.flat_watts * 0.2) {
+        log.warn('consumption',
+          `${prevHourTs}: midnight-reset delta near zero (${Math.round(rawTotalW)}W) — substituting flat_watts`);
+        upsertConsumption(prevHourTs, config.consumption.flat_watts, outdoorTemp, 'flat_fallback');
+        updateActual(prevHourTs, deltaPv);
+        log.info('consumption', `${prevHourTs}: load=flat_fallback (${config.consumption.flat_watts}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
+        recordPipelineRun('consumption');
+        return;
+      }
+
+      // ── Sub-hourly EV detection ───────────────────────────────────────────────
+      // Build a snapshot chain spanning [snapPrev, …15-min snapshots…, snapNow].
+      // Walk consecutive pairs: normalise each slot to watts, flag slots where
+      // load > max_house_w as EV-charging, and sum house-only energy separately.
+      let consumption_w;
+      let consumptionSource = 'inverter_delta';
+
+      const evEnabled  = config.ev?.enabled && (config.ev.charge_watts > 0);
+      const maxHouseW  = config.consumption?.max_house_w ?? Infinity;
+      const evChargeW  = config.ev?.charge_watts ?? 0;
+
+      if (evEnabled && maxHouseW < Infinity) {
+        const hourSnaps = getSnapshotsForRange(prevHourTs, currentHourTs);
+        const chain = (snapPrev.snapshot_ts < prevHourTs)
+          ? [snapPrev, ...hourSnaps]
+          : hourSnaps;
+
+        let houseEnergyKwh = 0;
+        let evDetected     = false;
+        let evSlots        = 0;
+
+        for (let i = 1; i < chain.length; i++) {
+          const s0 = chain[i - 1];
+          const s1 = chain[i];
+          const slotMin = (new Date(s1.snapshot_ts) - new Date(s0.snapshot_ts)) / 60000;
+          if (slotMin <= 0) continue;
+
+          const slotKwh = (s1.load_today_kwh ?? 0) >= (s0.load_today_kwh ?? 0)
+            ? (s1.load_today_kwh ?? 0) - (s0.load_today_kwh ?? 0)
+            : (s1.load_today_kwh ?? 0);
+          if (slotKwh <= 0) { houseEnergyKwh += 0; continue; }
+
+          const slotW = slotKwh / slotMin * 60 * 1000;
+
+          if (slotW > maxHouseW) {
+            const houseSlotW   = Math.max(100, slotW - evChargeW);
+            const houseSlotKwh = houseSlotW / 1000 * slotMin / 60;
+            houseEnergyKwh += houseSlotKwh;
+            evDetected = true;
+            evSlots++;
+          } else {
+            houseEnergyKwh += slotKwh;
+          }
+        }
+
+        if (chain.length >= 2) {
+          const spanMin = (new Date(chain[chain.length - 1].snapshot_ts) - new Date(chain[0].snapshot_ts)) / 60000;
+          consumption_w = Math.round(houseEnergyKwh / spanMin * 60 * 1000);
+
+          if (evDetected) {
+            consumptionSource = 'inverter_delta_ev';
+            log.info('consumption',
+              `${prevHourTs}: EV detected in ${evSlots} of ${chain.length - 1} sub-hourly slot(s) — storing house-only ${consumption_w}W`);
+          }
+        } else {
+          const spanMin = (new Date(snapNow.snapshot_ts) - new Date(snapPrev.snapshot_ts)) / 60000;
+          const normW   = Math.round(deltaLoad * 1000 * 60 / Math.max(1, spanMin));
+          if (normW > maxHouseW) {
+            consumption_w = Math.max(100, normW - evChargeW);
+            consumptionSource = 'inverter_delta_ev';
+            log.info('consumption', `${prevHourTs}: EV detected (normalised ${normW}W, span ${Math.round(spanMin)}min) — storing house-only ${consumption_w}W`);
+          } else {
+            consumption_w = normW;
+          }
+        }
+      } else {
+        const spanMin = (new Date(snapNow.snapshot_ts) - new Date(snapPrev.snapshot_ts)) / 60000;
+        consumption_w = Math.round(deltaLoad * 1000 * 60 / Math.max(1, spanMin));
+      }
+      upsertConsumption(prevHourTs, consumption_w, outdoorTemp, consumptionSource);
+      updateActual(prevHourTs, deltaPv);
+
+      log.info('consumption', `${prevHourTs}: load=${(deltaLoad ?? 0).toFixed(2)}kWh (${Math.round(consumption_w)}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
+      recordPipelineRun('consumption');
+      return;
+    }
+  } catch (err) {
+    log.error('consumption', 'Consumption delta error', err);
+  }
+
+  // Fallback: instantaneous reading
+  if (typeof driver.getMetrics !== 'function') return;
+  try {
+    log.warn('consumption', 'No energy snapshots — falling back to instantaneous reading');
+    const metrics = await driver.getMetrics(cfg);
+    upsertConsumption(currentHourTs, metrics.consumption_w, outdoorTemp, 'inverter_instant');
+    updateActual(currentHourTs, metrics.solar_w / 1000);
+    log.info('consumption', `Instantaneous fallback at ${currentHourTs}: consumption=${Math.round(metrics.consumption_w)}W, solar=${Math.round(metrics.solar_w)}W`);
+    recordPipelineRun('consumption');
+  } catch (err) {
+    log.error('consumption', 'Consumption fallback error', err);
+    recordPipelineRun('consumption', 'error');
+  }
 }
