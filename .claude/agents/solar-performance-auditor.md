@@ -18,7 +18,7 @@ All timestamps in the system are in the configured local timezone (from `config.
 - **`battery_schedule`** — LP optimizer output: `slot_ts`, `action`, `soc_start`, `soc_end`, `grid_kwh`, `solar_kwh`, `price`
 - **`consumption_readings`** — inverter telemetry: `slot_ts`, `consumption_wh`, `grid_import_wh`, `pv_power_w`, `soc`
 - **`prod_actual`** — actual production readings logged by consumptionPipeline
-- **Log files**: `logs/app.log`, `logs/pm2-out.log`, `logs/pm2-error.log`
+- **Log files**: `logs/app.log`, `logs/nssm-out.log`, `logs/nssm-error.log`
 
 ## Audit Dimensions
 
@@ -59,7 +59,7 @@ All timestamps in the system are in the configured local timezone (from `config.
 
 ### 6. Anomalies & Alerts
 - Any ERROR or WARN level log entries not already captured above
-- Unexpected process restarts (PM2 restart count)
+- Unexpected process restarts (check NSSM service restart count / log timestamps)
 - Missing data gaps (hours with no `consumption_readings` or `solar_readings`)
 - Optimizer producing identical schedules for many consecutive runs (possible stale data)
 

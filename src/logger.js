@@ -2,11 +2,11 @@
  * Levelled logger — writes timestamped lines to stdout and logs/app.log.
  *
  * Levels (lowest → highest): debug < info < warn < error
- * Set LOG_LEVEL=debug in the environment (or .env / PM2 ecosystem) to enable
+ * Set LOG_LEVEL=debug in the environment (or NSSM AppEnvironmentExtra) to enable
  * verbose output during development. Production default is 'info'.
  *
- * PM2 captures stdout/stderr to its own log files (~/.pm2/logs/).
- * The local logs/app.log lets you tail -f without going through PM2.
+ * NSSM captures stdout/stderr to logs/nssm-out.log and logs/nssm-error.log.
+ * The local logs/app.log lets you tail -f without going through NSSM.
  *
  * Usage:
  *   import log from './src/logger.js';

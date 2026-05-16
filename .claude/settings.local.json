@@ -121,7 +121,20 @@
       "Bash(awk -F: 'NR>400')",
       "WebFetch(domain:api.met.no)",
       "WebFetch(domain:developer.yr.no)",
-      "WebFetch(domain:docs.api.met.no)"
+      "WebFetch(domain:docs.api.met.no)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-WmiObject *)",
+      "PowerShell(nssm status *)",
+      "PowerShell(nssm get *)",
+      "PowerShell(Get-ScheduledTask *)",
+      "PowerShell(Get-Item *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-WinEvent -LogName Application -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'config|solar|forecast' } | Select-Object -First 10 TimeCreated, Id, Message | Format-List)",
+      "PowerShell(fsutil fsinfo *)",
+      "PowerShell(Get-Volume *)",
+      "Bash(awk -F: 'NR>=90330 && NR<=90400')",
+      "PowerShell(nssm *)"
     ]
   }
 }

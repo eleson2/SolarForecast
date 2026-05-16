@@ -704,14 +704,14 @@ In Load First mode, battery export is passive — it only occurs when PV surplus
 **Holding register 3038** (OperatingMode) switches the inverter to Grid First mode (value 2), which actively pushes battery energy to the grid. This enables `sell` slots to work at any hour, including evening price peaks.
 
 **Before enabling `grid.sell_enabled: true`, verify register 3038 with:**
-```bash
-pm2 stop solar-forecast
+```powershell
+nssm stop SolarForecast
 node read-register.js 3038 holding       # should read 0 (Load First)
 node write-register.js 3038 2            # write Grid First — check readback = 2
                                          # verify Growatt app shows Grid First mode
                                          # check battery current (input 3170) goes positive
 node write-register.js 3038 0            # restore Load First
-pm2 start solar-forecast
+nssm start SolarForecast
 ```
 
 If the readback does not change, reg 3038 may be a different format on this firmware. The V1.24 protocol doc lists 3038 as a bit-packed Time Period 1 start register (bits 13–14 = priority mode). Test empirically before enabling.
@@ -782,7 +782,7 @@ problems when the inverter is temporarily unreachable:
 2. The burst of rapid TCP connection attempts triggers the datalogger's rate-limiter.
 3. The rate-limiter causes subsequent connections to fail immediately rather than after a timeout,
    which can produce errors that escape the pipelines' try/catch blocks.
-4. The resulting unhandled rejection crashes the process → PM2 restarts → same sequence →
+4. The resulting unhandled rejection crashes the process → NSSM restarts → same sequence →
    crash loop repeating every ~21 s until the datalogger recovers.
 
 **Fix:** the three inverter-heavy pipelines now run sequentially at startup:
@@ -813,7 +813,7 @@ process.on('unhandledRejection', (reason) => {
 ```
 
 This is a last-resort safety net, not a substitute for proper error handling. It logs the
-problem without exiting, so PM2 does not restart the process and the inverter is left in
+problem without exiting, so NSSM does not restart the process and the inverter is left in
 whatever state it last received. If an unhandled rejection is ever logged it should be
 treated as a bug to fix in the relevant pipeline.
 

@@ -14,7 +14,7 @@ type: project
 ## Issue: Modbus "Illegal function" error cluster (first observed 2026-03-25)
 - **What:** "Modbus exception 1: Illegal function (device does not support this read/write function)" errors from executePipeline starting at 12:00 on 2026-03-25 and continuing through at least 21:30.
 - **Count:** 38 "Illegal function" + 6 short "Timed out" + 2 ETIMEDOUT = 46 total execution errors in one day.
-- **Pattern:** Correlated with 6 PM2 scheduler restarts on the same day. Each restart likely triggers a new Modbus connection sequence. The "Illegal function" error suggests register 3310 (LoadFirstStopSocSet holding register) writes are being rejected.
+- **Pattern:** Correlated with 6 scheduler restarts on the same day. Each restart likely triggers a new Modbus connection sequence. The "Illegal function" error suggests register 3310 (LoadFirstStopSocSet holding register) writes are being rejected.
 - **Mitigation seen:** System correctly resets to default after each error and continues next cycle. Production was not blocked (inverter was still readable — SOC reads succeeded).
 - **Why this matters:** If the register write is consistently rejected, the battery dispatch actions (charge_grid, discharge) are not being applied to the inverter. The inverter operates in its default/fallback mode.
 - **Status as of 2026-03-25:** Unresolved. Preceded full network outage that started at 22:01 on 2026-03-25 (see below).
@@ -34,7 +34,7 @@ type: project
 - **Effect:** No inverter commands have been sent for 8h+. Battery is operating in whatever default/last-written state it was in at 22:01. Scheduled actions (charge_grid, discharge) are all being skipped. Battery SOC unknown.
 - **12 config.js restarts total** (12 "config.js changed — restarting" events in log). Cluster of rapid restarts between 21:47–22:05 on 2026-03-25 (6 in ~18 minutes) strongly correlates with the onset of network failure — suggesting someone was actively editing config.js at that time.
 
-## Issue: 6+ PM2 Scheduler Restarts on 2026-03-25 (escalated to 12 total)
+## Issue: 6+ Scheduler Restarts on 2026-03-25 (escalated to 12 total)
 - First batch restarts at: 11:59:41, 13:42:45, 14:27:57, 14:43:23, 18:39:41 (6 during the day)
 - Second cluster: 21:47:21, 21:48:06, 21:59:04, 22:02:57, 22:05:51, 22:34:43, 23:04:03, 23:04:54, 23:05:42 (6+ more in the evening)
 - The evening cluster at 21:47–22:05 directly correlates with onset of network outage. Likely cause: user editing config.js (possibly changing inverter IP, port, or brand) which triggered the watcher restarts.
@@ -107,6 +107,14 @@ type: project
 - **Status updated**: dawn_soc_penalty reduced from 0.3 to 0.1 (applied before May 7). The dawn charge_grid STILL APPEARED on May 7 at 05:15 price=1.2972 SEK (HIGHER than May 5–6 at 0.94–0.97 SEK with penalty 0.3). Pattern persists.
 - **New hypothesis**: The dawn recharge is not primarily driven by the penalty — it may be driven by a minimum SOC constraint at solar ramp-up time. Even with penalty=0.1, the optimizer sees a benefit in having some buffer before solar output begins at 07:00–08:00.
 - **What to try next**: Consider `charge_grid_max_buy_price` cap (if config supports it), or raise `min_soc` from 10 to 20 so the floor is already above where dawn recharge targets.
+
+## CRITICAL NEW ISSUE: config.js restart storm — hourly automatic restarts (first observed 2026-05-15)
+- **What**: 24 config.js restarts in 24h on May 15, approximately one per hour at ~:21 past each hour. Prior maximum was 5 restarts in one day.
+- **Pattern**: Restarts occur at regular ~60-min intervals, NOT clustered around user editing sessions. Debounce is 240,000ms (4 min) — these restarts are separated by 60 min so each fires fully. The regularity suggests an automated process (not a user) is writing config.js.
+- **Likely causes**: (a) An antivirus or backup agent that scans/touches config.js hourly, (b) a cron job or scheduled task writing to the file, (c) a Windows automatic update process touching the project directory.
+- **Impact**: 717 fetch pipeline starts vs expected 4; 78 consumption pipeline runs vs expected 24; 49 battery pipeline runs vs expected ~24; 116 execute starts vs expected 96. Excessive API calls to Open-Meteo and met.no. Snapshot boundary offsets every hour (pairs of WARN messages). High CPU usage.
+- **No data corruption** observed — each restart completed cleanly and pipelines re-ran correctly.
+- **Status**: UNRESOLVED. Investigate what is writing config.js hourly. Check Windows Task Scheduler, antivirus logs, and any backup agents.
 
 ## Issue: Grid export exceeding 4.0 kW max_export_w limit (recurring — May 1 and May 12)
 - **What**: energy_snapshots show grid export rate of 4.3 kW on May 1 (13:15) and 5.2 kW on May 12 (17:30 — worst case so far). These exceed the configured max_export_w=4000 limit.

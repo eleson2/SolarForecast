@@ -20,7 +20,7 @@ the inverter.
 ## Prerequisites
 
 - Node.js 22+
-- PM2 (`npm install -g pm2`)
+- NSSM (`winget install nssm` or download from nssm.cc)
 - Growatt MOD TL3-XH (or compatible) inverter reachable on the local network
 - Windows or Linux home server on the same LAN as the inverter
 
@@ -111,35 +111,34 @@ Follow this sequence. Do not skip steps.
 
 `dry_run: true`, `data_collection_only: true` (defaults)
 
-Run as a service and let it collect data for at least a few days:
+Run as a service and let it collect data for at least a few days.
 
-```bash
-pm2 start ecosystem.config.cjs
-pm2 save
-```
-
-**Windows only — auto-start on reboot (no logon required):**
-
-`pm2 startup` does not work on Windows. Instead, register a Windows Scheduled
-Task that runs `pm2 resurrect` at system boot using the provided script:
+**Install as a Windows service with NSSM (auto-starts on reboot, no logon required):**
 
 1. Open PowerShell **as Administrator** (right-click → Run as Administrator)
 2. Run:
    ```powershell
-   cd G:\projects\SolarForecast
-   .\register-startup.ps1
+   nssm install SolarForecast "C:\Program Files\nodejs\node.exe" "scheduler.js"
+   nssm set SolarForecast AppDirectory "G:\projects\SolarForecast"
+   nssm set SolarForecast AppStdout "G:\projects\SolarForecast\logs\nssm-out.log"
+   nssm set SolarForecast AppStderr "G:\projects\SolarForecast\logs\nssm-error.log"
+   nssm set SolarForecast AppRotateFiles 1
+   nssm set SolarForecast AppRotateBytes 10485760
+   nssm start SolarForecast
    ```
 
-This creates a task that starts PM2 at system boot under your user account
-(`-LogonType S4U`), so the service comes up automatically after a reboot even
-if no one logs in.
+The service starts automatically at boot under the Local System account without
+requiring a user logon. To manage it:
 
-**After any change to the PM2 process list** (e.g. adding a new app), re-run
-`pm2 save` to update the saved state that `resurrect` restores.
+```powershell
+nssm start SolarForecast
+nssm stop SolarForecast
+nssm restart SolarForecast
+nssm status SolarForecast
+```
 
 The system reads SOC and telemetry from the inverter but never writes anything.
-Check `logs/app.log` or `pm2 logs solar-forecast` to confirm pipelines are
-running cleanly.
+Check `logs/app.log` or `logs/nssm-out.log` to confirm pipelines are running cleanly.
 
 Verify the health endpoint:
 ```
@@ -155,7 +154,7 @@ data_collection_only: false,   // scheduler will now call executePipeline
 dry_run: true,                 // writes are still mocked — logged only
 ```
 
-Restart: `pm2 restart solar-forecast`
+Restart: `nssm restart SolarForecast`
 
 Watch the logs for lines like:
 ```
@@ -172,7 +171,7 @@ In `config.js`:
 dry_run: false,
 ```
 
-Restart: `pm2 restart solar-forecast`
+Restart: `nssm restart SolarForecast`
 
 Watch for:
 ```
@@ -232,12 +231,12 @@ longer than 15 minutes. Valid actions: `charge`, `discharge`, `idle`.
 
 ### Logs
 
-```bash
-pm2 logs solar-forecast          # live stream
-pm2 logs solar-forecast --lines 200
+```powershell
+Get-Content logs\nssm-out.log -Wait    # live stream (Ctrl+C to exit)
+Get-Content logs\app.log -Tail 200     # last 200 lines
 ```
 
-Log files are also written to `logs/app.log` (rotated at 10 MB).
+Log files: `logs/app.log` (rotated at 10 MB), `logs/nssm-out.log`, `logs/nssm-error.log`.
 
 ### Health check
 
@@ -308,23 +307,26 @@ The `day_ahead_hour` config value triggers a replan when they arrive.
 
 ### Service did not start after Windows reboot
 
-If the service is missing after a reboot, the scheduled task may not be
-registered. Run `register-startup.ps1` as Administrator (see Setup above),
-then reboot to confirm. Verify the task exists with:
+Check the service status and error log:
 
 ```powershell
-Get-ScheduledTask -TaskName PM2SolarForecast
+nssm status SolarForecast
+Get-Content logs\nssm-error.log -Tail 50
 ```
 
-### PM2 process restarts in a loop
+If the service is not installed, re-run the NSSM install commands from the Setup
+section above in an Administrator PowerShell session.
+
+### Process crashes in a loop
 
 Check startup errors:
-```bash
-pm2 logs solar-forecast --lines 50 --err
+```powershell
+Get-Content logs\nssm-error.log -Tail 50
+Get-Content logs\app.log -Tail 50
 ```
 
 Config validation runs first — a bad config.js will print a clear error
-and exit. Fix the reported field and restart.
+and exit. Fix the reported field and restart: `nssm restart SolarForecast`.
 
 ### Consumption readings are zero or missing
 

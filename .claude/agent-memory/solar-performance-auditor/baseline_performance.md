@@ -141,7 +141,7 @@ type: project
 - 4 execute timeout errors: 03:30, 11:15, 20:30, and 10:15 on Apr 13. All transient, recovered next cycle.
 - 1 snapshot timeout at 13:15 on Apr 13 (TCP connect timeout). Only snapshot affected — execute succeeded on retry.
 - nssm-error.log: empty (0 bytes) — no process-level errors.
-- nssm replaces PM2 as the process manager for this installation (observed 2026-04-13).
+- NSSM is the process manager for this installation (Windows service `SolarForecast`; logs to `logs/nssm-out.log` / `logs/nssm-error.log`).
 - A process restart occurred around 13:15 on Apr 13 — startup banner visible in nssm-out.log. Triggered by user action (config.js watch or manual restart). Caused day-ahead batteryPipeline to fire at 13:15.
 - Apr 13: 13:15 restart caused tomorrow's prices (2026-04-14) to be fetched and day-ahead optimization to fire. Prices 2026-04-14 were available and loaded correctly.
 - Power reading at 13:15:58 showed −7188.3W (negative = charging). This is the highest charge rate seen in dataset — likely a charge_grid slot in progress.
@@ -505,3 +505,68 @@ type: project
 - Large EV event at 10:00 (10275W) correctly excluded (inverter_delta_ev flag).
 - R² stable at 0.19 — not improving but not declining. Temperature model remains weak predictor.
 - Recency bias: 1.437 at midnight, 1.500 (max observed) by 20:00 and continuing through end of day. Bias at cap level means model's daily intra-day correction was being pushed to the ceiling.
+
+## Solar Forecast Accuracy Baselines (2026-05-15 — mixed clouds with strong solar clearing afternoon)
+- Cloud cover: heavy overnight (66–97%), 62–89% morning (06:00–11:00), dropping 40→6% midday (12:00–15:00), then 0–21% afternoon.
+- Total actual production (energy_snapshots pv_today_kwh): 46.2 kWh. Total forecast (solar_readings, 15 active hours 06:00–20:00): 37.05 kWh. Ratio 1.25× (under-forecast day — strong midday PV exceeded model).
+- MAE: 1.143 kWh/h across 15 active hours. MAPE: 65.1% (dominated by 06:00 +404% and 13:00 +84%).
+- Notable hours >30% deviation: 06:00 (+404%, actual 0.30 vs forecast 0.060 kWh — dawn with cloud), 10:00 (+77%, actual 4.0 vs 2.25 kWh — heavy cloud but strong diffuse), 11:00 (+41%), 13:00 (+84%, actual 7.5 vs 4.08 kWh — best production hour of day), 15:00 (-21%), 17:00 (-27%), 19:00 (-46%), 20:00 (-65%).
+- Key finding: 13:00 actual 7.5 kWh was exceptional — this hour coincided with all-day EV charging (all 5 sub-slots showed EV). The actual=7.5 kWh stored in solar_readings likely includes EV load delta and PV combined (consumption=460W house-only, total load 7.2 kWh this hour). This may be a data artefact rather than genuine 7.5 kWh/h PV production. Warrants investigation — the correction_factor of 1.84× stored in the matrix for May day=15 hour=13 is plausible only if actual solar was genuinely that high.
+- Mountain shadow expected at 17:00 (forecast 3.31 vs actual 2.40 kWh, -27%) and 19:00 (forecast 0.74 vs actual 0.40 kWh, -46%) — consistent with site behaviour.
+- 20:00: forecast 0.285 kWh, actual 0.10 kWh (-65%). Nordic twilight residual — model slightly over-estimates at this marginal hour.
+- Correction matrix for May day=15: only 1 sample per hour (first time this calendar day has been observed). Values now stored: correction_avg for hours 07, 09, 12, 13, 14, 15, 16, 17, 18, 19, 20.
+
+## Battery Schedule & SOC (2026-05-15 — overnight discharge + EV session + passive export)
+- Starting SOC: 60% at 00:00 (from prior day discharge strategy).
+- Strategy: discharge overnight 00:00–07:45 (60%→26% by 06:00), brief charge_grid at 06:00 (26%→36%, price 0.874 SEK — dawn_soc_penalty=0 but optimizer still chose grid charge here), solar charging rapid 09:00–12:45 (34%→95%), battery reached 100% at 13:30, held 100% through 19:15 (passive export window), evening discharge 19:15–23:45 (100%→78%).
+- charge_grid at 06:00 despite dawn_soc_penalty=0: This is a new observation. Battery reached 26% by 06:00 which is below min_soc=10% floor but close to it. The optimizer may have inserted this recharge because a heavy discharge slot at 05:45 (1341W at 1.09 SEK) dropped SOC to 26%, and the 06:00 price (0.87 SEK) was relatively cheaper in the local context. Not a dawn_soc_penalty artefact — the charge is driven by local price valley (06:00 is the cheapest slot in the 06:00–07:45 window at 0.87 vs 1.07–1.28 SEK).
+- Mean absolute SOC deviation: 2.68% across 90 paired slots. Excellent adherence.
+- 9 slots with ≥8% deviation — ALL positive (actual above plan), occurring 10:00–19:00. Pattern: solar charged battery significantly faster than LP plan expected (model used battery schedule assumptions that did not capture actual PV surplus). Largest: 12:00 actual 78% vs plan 59% (+19%). Harmless positive overshoots — battery filled to 100% earlier than planned.
+- SOC deviation guard: did NOT fire. All overruns were positive (actual > plan), so guard threshold was not triggered (guard only fires when actual < plan − threshold).
+- Manual override: EV-detection auto-charge fired at 21:30 and 21:36 (both executed). EV detected in 21:00 hour. Auto-charge lasted ~20 min, then cleared.
+- No negative SOC deviations ≥8% at any slot.
+- Grid import May 15: 8.9 kWh (includes 6:00 dawn charge_grid: ~2.0 kWh grid burst at 06:15 when SOC jumped 26→36%, and overnight grid covering house load at idle). Grid export: 2.9 kWh (passive during 100% SOC window 14:00–19:30 at modest 2 kW rate).
+- End-of-day SOC: 78% at 23:45.
+- Total PV May 15: 46.2 kWh. Total load May 15: 49.9 kWh (high — EV charging all afternoon 11:00–17:00).
+
+## Price Optimisation Patterns (SE3, 2026-05-15)
+- Price range: 0.314–1.406 SEK/kWh. Average: 0.969 SEK/kWh. VERY expensive day — floor nearly 0.31 SEK, avg ~1 SEK.
+- No cheap overnight window (all night: 0.87–1.09 SEK/kWh). Floor was at 06:00 (0.874 SEK) — the only sub-0.90 slot in the entire day.
+- Daytime cheapest: 15:00 (0.314 SEK), 16:00 (0.421 SEK), 13:45 (0.357 SEK). These are unusual — midday was cheap due to solar surplus in the market.
+- Peak price: 22:00 (1.406 SEK), 21:00 (1.400 SEK), 18:30–19:45 (1.30–1.37 SEK). Evening peak correctly targeted for discharge.
+- LP optimizer savings: 12.52 SEK at midnight, declining to 11.20 SEK at 01:30 as battery discharged. Stable range 11–13 SEK throughout overnight.
+- Sell shadow: +8.05 SEK extra at midnight (sell_enabled=false). This is significant — sell mode would have captured material extra revenue on a high-price day with 2.9 kWh passive export. Pattern: sell shadow elevated at +7.9–8.1 SEK throughout all overnight battery runs.
+- Day-ahead re-optimisation: May 16 prices available from midnight (battery pipeline at 00:30 had full data). No separate day-ahead trigger visible.
+- Optimizer action summary: 96 slots total — ~35 discharge, ~25 idle, ~30 discharge (evening), 1 charge_grid (06:00), 2 charge_solar (15:00 and 16:00 plan — actually battery was at 100% by then so these were artefacts of schedule not tracking actual SOC).
+
+## Modbus / Hardware Observations (2026-05-15)
+- Total distinct Modbus error events: ~10 (significantly lower than May 12's 17, much lower than May 7's 175).
+- 02:00: 1× ETIMEDOUT unhandled (non-fatal, execute not affected).
+- 05:00: execute Timed out → transient flag set, inverter left in last-written state. 1× ETIMEDOUT unhandled. Execute recovered at 05:15.
+- 06:15: 1× ETIMEDOUT unhandled (during charge_grid slot — CRITICAL: may have interrupted the charge_grid execution).
+- 06:25: execute Timed out + transient flag + ECONNRESET. Execute recovered at 06:30. 06:30 batteryPipeline used lastKnownSoc=32% (Port Not Open fallback).
+- 08:30: batteryPipeline lastKnownSoc=48% (Timed out). Execute succeeded this cycle.
+- 17:30: execute Timed out → transient flag. Recovered at 17:45.
+- 18:30: execute PortNotOpenError → reset to default (non-transient: reset fired, inverter briefly returned to default state before next cycle wrote correct values).
+- 21:30: ev_detection override active, applied charge action (2 consecutive cycles).
+- Total execute failures: 3 (05:00, 06:25, 17:30 transient — plus 18:30 PortNotOpen with reset).
+- lastKnownSoc fallback activations: 2 (06:30 at 32%, 08:30 at 48%). Both during morning solar ramp-up. Values were within plausible range.
+- No "Illegal function" errors.
+- No sustained outage (contrast with May 7's 12-hour blackout).
+- dry_run: false. All commands live.
+- Snapshot count: 116 in DB, of which 26 have null battery_soc (all are off-boundary timestamps from config.js restarts creating extra snapshot entries). All 96 standard 15-min boundary slots have SOC populated.
+- CRITICAL: 24 config.js restarts over 24h (one approximately every hour). This is abnormal and appears to be a process triggering the config watcher in a loop — NOT user-initiated editing. The debounce is 240,000ms (4 min), yet restarts fired exactly ~60 min apart (matching cron intervals). This is a NEW pattern not seen before. Each restart caused: duplicate fetch pipeline run, duplicate battery run, duplicate consumption run, duplicate execute run, and snapshot boundary offset. The 717 fetch pipeline starts (vs expected 4) directly caused by this restart storm.
+- Peak shaving confirmed: import=12 kW, export=11 kW (summer config, set at 00:21 and 01:21 restarts).
+- Max grid export rate: 2.0 kW (from 0.5 kWh/15min delta at 18:15). Well within 4.0 kW limit — no export exceedance today.
+
+## Consumption Model (2026-05-15)
+- n=789, R²=0.187, slope=-93.2 W/°C, intercept=2261.9 W. EV exclusions: 24+ readings.
+- EV detected at 11:00 (1 sub-slot), 13:00 (all 5 sub-slots), 14:00 (all 5), 15:00 (all 4), 16:00 (3 of 5), 17:00 (2 of 4), 21:00 (1 of 4), 23:00 (2 of 5). Heavy EV day.
+- House-only consumption well-behaved: 180–2267W (12:00 anomaly at 2267W — see 75-min snapshot boundary offset artefact).
+- R²=0.187 stable from prior days. Temperature 5.1–14.4°C throughout day.
+
+## Config Restart Storm — New Issue (2026-05-15)
+- 24 config.js restarts observed, approximately one per hour on the hour (:21 past each hour from 00:21 through ~19:31, then at :33, :36, :38 late evening). This matches NO prior audit pattern.
+- Prior maximum: 5 restarts (Apr 12 lunchtime cluster). 24 in one day is 5× worse than any prior day.
+- The regularity (every 60 min) strongly suggests the config watcher is being triggered by something other than user edits — possibly an external process, cron job, or antivirus touching config.js. The 4-min debounce should prevent double-fires from editor writes, but ~60-min regularity bypasses the debounce.
+- Impact: 717 fetch pipeline starts (expected 4), 78 consumption pipeline runs (expected 24), 116 execute starts (expected 96). No data corruption observed but significant CPU waste and excessive API calls to Open-Meteo and met.no.

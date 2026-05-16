@@ -13,20 +13,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install dependencies
 npm install
 
-# --- Production (PM2) ---
-pm2 start ecosystem.config.cjs    # start as managed service
-pm2 stop solar-forecast           # stop
-pm2 restart solar-forecast        # restart
-pm2 logs solar-forecast           # stream logs (Ctrl+C to exit)
-pm2 logs solar-forecast --lines 200  # last 200 lines
-pm2 save                          # save process list (run after any pm2 change)
-pm2-startup install               # register auto-start on Windows login (one-time setup, already done)
-pm2-startup uninstall             # remove auto-start
+# --- Production (NSSM Windows service) ---
+nssm start SolarForecast          # start service
+nssm stop SolarForecast           # stop service
+nssm restart SolarForecast        # restart service
+nssm status SolarForecast         # check running state
+sc.exe query SolarForecast        # alternative status check
 
 # Log files (also written directly by the app)
-#   logs/app.log       — app log (rotated at 10 MB)
-#   logs/pm2-out.log   — PM2 stdout capture
-#   logs/pm2-error.log — PM2 stderr capture
+#   logs/app.log        — app log (rotated at 10 MB)
+#   logs/nssm-out.log   — NSSM stdout capture
+#   logs/nssm-error.log — NSSM stderr capture
 
 # --- Development ---
 node scheduler.js                 # run directly (no auto-restart)

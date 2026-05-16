@@ -173,7 +173,7 @@ export default {
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.
         charge_soc: 90,                           // SOC floor when charging (high = battery fills up)
-        discharge_soc: 20,                        // SOC floor when discharging (low = battery empties)
+        discharge_soc: 15,                        // SOC floor when discharging (low = battery empties)
 
         // --- Growatt cloud API settings (used when brand = 'growatt') ---
         // server: 'https://openapi.growatt.com/',

@@ -5,6 +5,7 @@ try { os.setPriority(os.constants.priority.PRIORITY_LOW); } catch {}
 import cron from 'node-cron';
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { validateConfig } from './src/config-validator.js';
 import { 
@@ -69,18 +70,31 @@ cron.schedule('*/15 * * * *', async () => {
 // --- Config file watcher ---
 const configPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'config.js');
 let configReloadTimer = null;
+// Snapshot the file hash at startup so spurious fs.watch events (Windows NTFS access-time
+// updates, Search Indexer touches, etc.) don't trigger unnecessary restarts.
+const configHashAtStart = createHash('sha256').update(fs.readFileSync(configPath)).digest('hex');
+
 const configWatcher = fs.watch(configPath, () => {
   if (configReloadTimer) return;
+  let currentHash;
+  try {
+    currentHash = createHash('sha256').update(fs.readFileSync(configPath)).digest('hex');
+  } catch { return; }
+  if (currentHash === configHashAtStart) {
+    log.info('scheduler', 'config.js watch event — content unchanged, ignoring (spurious OS event)');
+    return;
+  }
   const debounceMs = config.system?.config_reload_debounce_ms ?? 30000;
   configReloadTimer = setTimeout(() => {
     log.info('scheduler', 'config.js changed — restarting to apply new settings');
-    process.exit(0);
+    // Close the HTTP server before exiting so NSSM's immediate restart doesn't hit EADDRINUSE
+    server.close(() => process.exit(0));
   }, debounceMs);
 });
 process.on('exit', () => configWatcher.close());
 
 // --- Start server ---
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log.info('scheduler', `Solar Forecast API running on port ${PORT}`);
   log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
