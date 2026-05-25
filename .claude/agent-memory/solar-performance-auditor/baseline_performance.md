@@ -565,6 +565,56 @@ type: project
 - House-only consumption well-behaved: 180–2267W (12:00 anomaly at 2267W — see 75-min snapshot boundary offset artefact).
 - R²=0.187 stable from prior days. Temperature 5.1–14.4°C throughout day.
 
+## Solar Forecast Accuracy Baselines (2026-05-25 — early-morning overcast, clear midday)
+- Cloud cover: 85% at midnight, clearing overnight (60%/30%/2%/1% at 01:00–04:00), 4% at 06:00, 16% at 07:00, 30% at 08:00, rising to 32% at 09:00 then dropping to 1% midday, 38% at 17:00.
+- Total actual production (energy_snapshots pv_today_kwh as of ~19:30): ~40.4 kWh (day not yet complete — likely final 42–44 kWh).
+- Active hours with prod_actual: 06:00 (0.30 kWh, fcst 0.60, −50%), 07:00 (0.40 kWh, fcst 1.61, −75%), 08:00 (1.00 kWh, fcst 2.74, −64%), 09:00 (3.10 kWh, fcst 3.16, −2%), 10:00 (3.40 kWh, fcst 2.16, +57%), 12:00 (5.20 kWh, fcst 3.59, +45%), 13:00 (5.60 kWh, fcst 1.89, +197%), 14:00 (5.60 kWh, fcst 1.73, +224%), 15:00 (4.10 kWh, fcst 2.62, +57%), 16:00 (3.80 kWh, fcst 6.28, −39%), 17:00 (1.70 kWh, fcst 6.50 cap, −74%), 18:00 (1.70 kWh, fcst 3.63, −53%).
+- 06:00–08:00 morning: massive under-forecast due to model using stale intra-day scalar. correction_applied was 0.94–0.97 (near-neutral) while actual production was well below forecast irradiance prediction.
+- 13:00–14:00 extreme: forecast 1.89/1.73 vs actual 5.60/5.60 — correction_factor 2.97/3.23. This is the clear-day pattern where the correction matrix (correction_applied ~1.03–1.11) was insufficient. These are May 25 day=25 cells with limited prior samples — correction matrix just learning this calendar date.
+- 16:00–18:00 mountain shadow + late afternoon: forecast over-predicts dramatically (6.28/6.50/3.63 vs actual 3.80/1.70/1.70). The 17:00 cap at 6.50 is the model's upper bound. Classic mountain shadow cut-off combined with afternoon solar angle decline. Expected site behaviour.
+- MAE for 12 active hours with prod_actual: approximately 1.8 kWh/h. MAPE dominated by 13:00/14:00 (+200%) and 07:00 (−75%).
+- Key pattern: mornings severely OVER-forecast (model thinks sun is up but actuals are low due to cloud); afternoon (13:00–15:00) severely UNDER-forecast (model doesn't have enough May correction data for clear-sky high irradiance days).
+
+## Battery Schedule & SOC (2026-05-25 — overnight discharge to 23%, strong solar recovery, 100% through afternoon)
+- Starting SOC at midnight: 65% (energy_snapshot 00:00). This is the yesterday end-of-day reading carried over.
+- Overnight strategy: continuous discharge. SOC trajectory: 65%→50%→40%→31%→27%→26% by 06:00. Large power spike at 04:00–04:45 (3138–3148W discharge) indicating high load event overnight (EV or appliance).
+- SOC bottomed at 23% at 08:00 (energy_snapshot). Battery continued discharging to 23% floor without any soc_replan_min_soc emergency charge.
+- Solar recovery: SOC 23%→26%→34%→52%→72%→89%→100% from 08:15 through 12:15. Battery at 100% by 12:15–12:30.
+- 100% SOC window: 12:45 through 19:00+ (at least 6.5h of passive export). Current grid export = 21.9 kWh as of 19:30.
+- End-of-period SOC (19:30): 98%.
+- Zero charge_grid slots. dawn_soc_penalty=0 confirmed still effective — no emergency dawn pre-charge.
+- 2 snapshot missing slots: 09:00 (ETIMEDOUT) and 12:30 (null battery_soc). Data gaps are isolated.
+- Notable: battery schedule contained discharge actions even during 09:30–10:45 at prices ≤0.02 SEK/kWh and even at negative prices (−0.01 SEK). Optimizer chose to discharge into near-zero/negative price slots — possibly a schedule artefact from a replan that had stale SOC (soc_start showed 34% for 09:30 when actual was in same range).
+
+## Battery Schedule & SOC (2026-05-25 — soc_replan_min_soc removal context)
+- OLD BEHAVIOUR (before today's change): soc_replan_min_soc: 30 was a safety floor. When battery hit ≤30% SOC, the executePipeline would FORCE a charge_grid override rather than trigger a replan. This prevented SOC falling further but charged at whatever price was current.
+- NEW BEHAVIOUR (after change): The guard now always triggers a batteryPipeline replan (no force-charge). The replan looks at current prices and the full forward price horizon to decide whether to charge or continue discharging.
+- WHAT HAPPENED TODAY: Battery drained overnight to 26% at 06:00 (planned). Old guard would have force-charged at ~0.65 SEK/kWh. New guard (no min_soc) let the optimizer see that prices would fall SHARPLY from ~0.65 SEK at 06:30 to 0.46 SEK at 08:30, then to 0.06 SEK at 08:45, and near-zero/negative by 09:15+. The optimizer correctly chose to idle/discharge until solar took over at ~08:15–08:30.
+- NO charge_grid events observed at all today. This is the first day where the removal is visible — battery went to 23% without triggering any emergency charge.
+- Grid import today: only 0.8 kWh (all from the overnight period when load slightly exceeded battery+solar). No grid charging at 0.65 SEK.
+
+## Price Optimisation Patterns (SE3, 2026-05-25)
+- Full day price range: −0.032 to 0.849 SEK/kWh (96 slots). Average: 0.419 SEK/kWh.
+- Overnight (00:00–08:30): expensive 0.59–0.74 SEK/kWh. Morning price collapse: 08:30=0.46, 08:45=0.06, 09:00–09:15=0.03–0.13, 09:30 onward drops to near-zero then negative (10:30+: 0 to −0.032 SEK).
+- Afternoon/evening expensive: 17:45=0.57, 18:30–18:45=0.62–0.69, 19:00–20:00=0.70–0.85 SEK/kWh.
+- Price structure: bimodal — expensive night+early morning and expensive evening, with cheap/negative midday. Classic solar-surplus market structure for a sunny May day in SE3.
+- Optimizer savings: 6.42 SEK at 06:30 replan. Grew to 14.23 SEK at 17:25 restart run. Excellent outcome.
+- Sell shadow at 17:25: +14.23 SEK (sell_enabled=false, sell shadow marginally positive).
+- Key savings from soc_replan removal: avoided ~0.65–0.74 kWh of grid charging at 0.65 SEK = approximately 0.42–0.48 SEK saved just on the avoided morning forced charge. The bigger gain is the opportunity cost — if the forced charge had bought ~3–5 kWh at 0.65 SEK when those same kWh were free from solar 3h later, the avoidance is worth ~2–3 SEK.
+- May 26 prices: 96 slots loaded at 17:25 restart. Overnight floor ~0.64–0.65 SEK (all expensive again).
+
+## Modbus / Hardware Observations (2026-05-25)
+- Total distinct Modbus error events: 12 (3 clusters).
+- Cluster 1: 03:00 — ETIMEDOUT + execute TCP timeout + 2 unhandled ETIMEDOUT + ECONNRESET. Execute failed, transient flag. Recovered at 03:15.
+- Cluster 2: 07:15 — ETIMEDOUT cluster (4 events) + execute TCP timeout + snapshot TCP timeout. Execute failed, transient flag. Recovered at 07:30.
+- Cluster 3: 10:30 — execute "Timed out", transient flag. Recovered at 10:45.
+- 1 lastKnownSoc fallback at 17:30 (Timed out — used 98%). Battery was at 100% so value was conservative but correct direction.
+- Snapshot count as of 19:30: 73 of ~75 expected. 2 missing: 09:00 (ETIMEDOUT) and 12:30 (null battery_soc from 12:30 cluster overlap).
+- No "Illegal function" errors.
+- dry_run: false (all commands live).
+- 1 service restart at 17:25 (user action — soc_replan_min_soc code removal and testing). Triggered full pipeline burst (fetch, battery, consumption, execute, snapshot all fired at once).
+- Peak export: confirmed 21.9 kWh total as of 19:30, predominantly from 12:45–19:00 passive export window. Peak rate ~1.1 kWh/15min = ~4.4 kW — slightly above the 4.0 kW limit.
+
 ## Config Restart Storm — New Issue (2026-05-15)
 - 24 config.js restarts observed, approximately one per hour on the hour (:21 past each hour from 00:21 through ~19:31, then at :33, :36, :38 late evening). This matches NO prior audit pattern.
 - Prior maximum: 5 restarts (Apr 12 lunchtime cluster). 24 in one day is 5× worse than any prior day.

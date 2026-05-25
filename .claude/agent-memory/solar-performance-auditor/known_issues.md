@@ -130,6 +130,18 @@ type: project
 - **May 6 special case**: A second charge_grid slot at 07:45 (price 1.36 SEK, 265W) appeared — likely a replan artefact when SOC drifted below plan mid-morning before solar was sufficient.
 - **Status**: Configuration issue to investigate. Lowering dawn_soc_penalty from 0.3 to 0.1–0.2 may reduce the dawn pre-charge frequency. Alternatively, raising soc_replan_min_soc above 20 or setting a charge_grid_max_buy_price would cap the dawn-charge price.
 
+## Issue: soc_replan_min_soc force-charge guard — REMOVED 2026-05-25
+- **What**: Old guard triggered `charge_grid` override when SOC ≤ 30%, bypassing the optimizer. This force-charged at whatever the current price was, regardless of upcoming cheaper windows.
+- **Manifestation today**: Battery drained overnight to ~26% by 06:30 at prices 0.60–0.68 SEK/kWh. Had the old guard been active, it would have force-charged at ~0.65 SEK. With the guard removed, the optimizer (via replan) correctly identified that prices collapse to 0.46 SEK at 08:30 and near-zero by 08:45, so it waited for solar (and near-free grid) rather than charging at 0.65 SEK.
+- **Result**: Zero charge_grid events today. Grid import = 0.8 kWh total (all overnight, no voluntary charging).
+- **Status: RESOLVED**. Guard replaced by unconditional replan trigger in inverter-engine.js. The SOC deviation guard still fires (compares actual vs plan) but now always replans rather than force-charging.
+
+## Issue: Battery schedule discharges at near-zero/negative prices (observed 2026-05-25)
+- **What**: Slots at 09:30–10:45 show discharge action at prices 0.020→0.011→0.002→0.000→−0.001 SEK/kWh. The LP optimizer chose discharge into negative-price slots.
+- **Context**: These slots appeared in the schedule from a prior (06:30) replan. The schedule's soc_start values (34%, 32%, 30%) did not match actual SOC (which was rising due to solar charging). By 09:30, actual SOC was 34% (matching plan) but rising fast from solar. A subsequent replan at 10:30 showed soc_start=52% — clearly a new replan had updated the slot.
+- **Root cause**: Schedule is not invalidated when actual SOC overtakes planned SOC. When solar is actively charging faster than plan, idle/charge_solar slots from the next replan would have been better. But discharge into near-zero prices has negligible cost impact.
+- **Status**: Monitor. Minor inefficiency (discharging at ~0 SEK when the battery is filling from solar anyway).
+
 ## Issue: Cloud-irradiance cap fires but is insufficient on high-diffuse May days (first observed 2026-05-01)
 - **What**: The cloud-irradiance cap (enabled: true, cloud_pct_threshold: 30, irr_wm2_threshold: 400, cap_factor: 0.45) fired at 11:00, 12:00, and 13:00 on May 1. The cap constrained forecast to 1.94/2.20/2.36 kWh respectively — but actual production was 5.1/5.6/5.9 kWh. The cap helped slightly but the forecast was still 2.5–3× too low.
 - **Root cause**: May 1 had 45–93% cloud cover during the midday peak, yet actual production was extremely high — consistent with a uniform diffuse overcast that lets through 70–85% of GHI. Open-Meteo irradiance values underestimated this. The correction matrix has zero May samples, so no learned correction exists yet. The 0.45 cap factor, combined with a POA-to-GHI physics baseline that's already underestimated, produces a bound that is still far below reality.

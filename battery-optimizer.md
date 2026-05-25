@@ -28,7 +28,7 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Live SOC seeding         | Done        | Optimizer accepts `options.startSoc` from inverter; scheduler + CLI read SOC before each run |
 | Last-known SOC fallback  | Done        | `lastKnownSoc` in `scheduler.js` — Modbus timeouts no longer reset optimizer to `min_soc` default |
 | Solar forecast confidence| Done        | `battery.solar_forecast_confidence` multiplier + `min_grid_charge_kwh` floor prevent solar forecast from crowding out all grid charging. Both are now **cloud-adjusted**: `effectiveConfidence = confidence × (1 − cloud/100)` at runtime; `effectiveMinReserve` scales to 0 kWh at 100% cloud cover (linearly from 80%) so the battery charges more from grid on fully overcast days. |
-| SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; if deficit > `soc_deviation_threshold`: SOC ≥ `soc_replan_min_soc` → triggers replan (price-aware recovery); SOC < `soc_replan_min_soc` → forces `charge_grid` immediately (safety floor) |
+| SOC deviation guard      | Done        | `executePipeline` compares live SOC to `slots[0].soc_start`; if deficit > `soc_deviation_threshold` a full replan is triggered so the optimizer picks the cheapest recovery slot |
 | Manual override API      | Done        | `src/override.js` + `GET/POST/DELETE /battery/override` — persists action across 15-min execute cycles |
 | Modbus retry logic       | Done        | `withReconnect()` retries up to `modbus_retries` times with `modbus_retry_delay_ms` delay (config-driven) |
 | Stale forecast fix       | Done        | `upsertReading` clears `prod_forecast`/`correction_applied` on irradiance update if no `prod_actual` yet; `getReadingsWithoutForecast` always returns future rows so every model run refreshes remaining-day forecasts |
@@ -312,11 +312,8 @@ export default {
         min_grid_charge_kwh: 4.0,
 
         // SOC deviation guard — if actual SOC falls this many percentage points below the
-        // optimizer's planned soc_start for the current slot, executePipeline responds:
-        //   SOC >= soc_replan_min_soc → trigger a full replan (price-aware recovery).
-        //   SOC <  soc_replan_min_soc → force charge_grid this slot (safety floor).
+        // optimizer's planned soc_start for the current slot, a full replan is triggered.
         soc_deviation_threshold: 8,
-        soc_replan_min_soc: 30,
     },
     grid: {
         sell_enabled: false,         // can sell back to grid?
@@ -800,6 +797,31 @@ and logged before `batteryPipeline` begins, so the datalogger's rate-limiter is 
 triggered. Startup takes slightly longer when the inverter is offline (timeouts are
 sequential, not parallel) but the system remains stable.
 
+### Fetch pipeline resilience (fetch timeout + in-flight guard)
+
+**Problem discovered 2026-05-25:** `fetch()` in `src/fetcher.js` and `src/yr-fetcher.js` had no
+timeout. When api.met.no held TCP connections open without responding, every `fetchPipeline` call
+hung indefinitely at `await Promise.allSettled([fetchWeather(), fetchYr()])`. The hourly battery
+replan (triggered whenever `intraday_actual/forecast > 1.8×`) kept adding new stuck calls — none
+ever completed or logged "Fetch pipeline error", causing a continuous storm of concurrent hanging
+`fetchPipeline` calls that ran for days.
+
+**Fixes applied:**
+
+1. **30-second `AbortController` timeout** on all `fetch()` calls (`fetchWithTimeout` helper in
+   `fetcher.js`, used by both `fetchWeather` and `fetchYr`). If met.no doesn't respond within 30s,
+   `fetchYr` throws → `fetchPipeline` logs a non-fatal YR warning and continues with Open-Meteo
+   data only. Open-Meteo normally responds in ~14s, well within the 30s window.
+
+2. **In-flight guard** on `fetchPipeline` (`fetchPipelineInFlight` boolean in
+   `inverter-engine.js`). If a fetch is already running, subsequent calls return immediately
+   with a warning. Prevents the storm from building even if a fetch takes close to 30s.
+
+**Behavior after fix:**
+- met.no down → YR times out in 30s, logged as non-fatal, Open-Meteo data used alone
+- Open-Meteo down → all 3 attempts (30s each + 5s delays) = ~100s, then "Fetch pipeline error"
+- batteryPipeline intraday refetch while fetch in flight → skipped, battery runs on current data
+
 ### Global unhandled-rejection handler
 
 Even with sequentialized startup, a promise rejection could theoretically escape a pipeline's
@@ -853,22 +875,13 @@ curve, the response depends on how much charge remains:
 deficit = slots[0].soc_start − state.soc
 
 if deficit > soc_deviation_threshold:
-    if state.soc >= soc_replan_min_soc:
-        → trigger batteryPipeline immediately (price-aware recovery)
-    else:
-        → force current slot to charge_grid (safety floor — battery too low to wait)
+    → trigger batteryPipeline immediately (price-aware recovery)
 ```
 
-**Above `soc_replan_min_soc` (default 30%):** a full replan runs immediately so the
-optimizer can choose the cheapest upcoming slot to recover — avoiding expensive grid
-charging when cheaper prices are imminent.
+A full replan runs so the optimizer can choose the cheapest upcoming slot to recover —
+avoiding expensive grid charging when cheaper prices or solar are imminent.
 
-**Below `soc_replan_min_soc`:** the current 15-min slot is overridden to `charge_grid`
-regardless of price. The battery is too low to be selective; the next hourly
-`batteryPipeline` re-plans from the recovered SOC.
-
-Configurable via `config.battery.soc_deviation_threshold` (default: 8 %) and
-`config.battery.soc_replan_min_soc` (default: 30 %).
+Configurable via `config.battery.soc_deviation_threshold` (default: 8 %).
 
 ---
 

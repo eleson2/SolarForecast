@@ -17,6 +17,7 @@ import { runModel } from './model.js';
 
 let lastPeakShavingKey = null; // track last written "{import}/{export}" to avoid redundant writes
 let lastKnownSoc = null;
+let fetchPipelineInFlight = false;
 
 export function getLastKnownSoc() {
   return lastKnownSoc;
@@ -30,6 +31,11 @@ export function setLastKnownSoc(soc) {
  * Weather fetch pipeline.
  */
 export async function fetchPipeline() {
+  if (fetchPipelineInFlight) {
+    log.warn('fetch', 'Fetch already in progress — skipping duplicate call');
+    return;
+  }
+  fetchPipelineInFlight = true;
   try {
     log.info('fetch', 'Starting fetch pipeline');
     const [omResult, yrResult] = await Promise.allSettled([fetchWeather(), fetchYr()]);
@@ -49,6 +55,8 @@ export async function fetchPipeline() {
   } catch (err) {
     log.error('fetch', 'Fetch pipeline error', err);
     recordPipelineRun('fetch', 'error');
+  } finally {
+    fetchPipelineInFlight = false;
   }
 }
 
@@ -238,25 +246,15 @@ export async function executePipeline() {
 
     // SOC deviation guard
     const socDeviationThreshold = config.battery?.soc_deviation_threshold ?? 8;
-    const socReplanMinSoc = config.battery?.soc_replan_min_soc ?? 30;
     const plannedSoc = slots[0]?.soc_start;
     let triggerReplan = false;
-    let forceCharge = false;
     if (plannedSoc != null && state.soc < plannedSoc - socDeviationThreshold) {
       const deficit = Math.round(plannedSoc - state.soc);
-      if (state.soc >= socReplanMinSoc) {
-        log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — SOC above ${socReplanMinSoc}%, triggering replan`);
-        triggerReplan = true;
-      } else {
-        log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — SOC below ${socReplanMinSoc}%, forcing charge_grid`);
-        forceCharge = true;
-      }
+      log.warn('execute', `SOC deviation: actual ${state.soc}% vs planned ${plannedSoc}% (−${deficit}%) — triggering replan`);
+      triggerReplan = true;
     }
 
-    const dispatchSlots = forceCharge
-      ? [{ ...slots[0], action: 'charge_grid' }, ...slots.slice(1)]
-      : slots;
-    const result = await driver.applySchedule(dispatchSlots, cfg);
+    const result = await driver.applySchedule(slots, cfg);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
     // Apply peak shaving limits

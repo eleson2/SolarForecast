@@ -98,12 +98,8 @@ export default {
         // null = no ceiling (backward-compatible default).
         charge_grid_max_buy_price: null,
         // If actual SOC falls this many percentage points below the optimizer's plan,
-        // executePipeline responds. When SOC is above soc_replan_min_soc, a full replan
-        // is triggered so the optimizer can pick the cheapest recovery slot. When SOC is
-        // below soc_replan_min_soc, the current slot is forced to charge_grid immediately
-        // (safety first — don't wait for a replan when the battery is critically low).
+        // a full replan is triggered so the optimizer can pick the cheapest recovery slot.
         soc_deviation_threshold: 8,
-        soc_replan_min_soc: 30,
     },
     grid: {
         // Set sell_enabled: true to allow the optimizer to plan battery→grid export slots.

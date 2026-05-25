@@ -34,6 +34,16 @@ export function saveRaw(prefix, data) {
   return filename;
 }
 
+const FETCH_TIMEOUT_MS = 30_000;
+
+// Returns { signal, cancel } — pass signal to fetch(), call cancel() when done to clear
+// the timer. The signal covers both headers and body so body-read hangs are also cut off.
+export function makeTimeoutSignal() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+}
+
 export async function fetchWeather() {
   const { lat, lon } = config.location;
 
@@ -44,17 +54,21 @@ export async function fetchWeather() {
     + `&timezone=${encodeURIComponent(config.location.timezone)}`;
 
   return withRetry(async () => {
-    log.info('fetch', `GET ${url}`);
-    const t0 = Date.now();
-    const res = await fetch(url);
-    log.info('fetch', `${res.status} in ${Date.now() - t0}ms`);
-    if (!res.ok) {
-      throw new Error(`Open-Meteo request failed: ${res.status} ${res.statusText}`);
+    const { signal, cancel } = makeTimeoutSignal();
+    try {
+      log.info('fetch', `GET ${url}`);
+      const t0 = Date.now();
+      const res = await fetch(url, { signal });
+      log.info('fetch', `${res.status} in ${Date.now() - t0}ms`);
+      if (!res.ok) throw new Error(`Open-Meteo request failed: ${res.status} ${res.statusText}`);
+      const data = await res.json();
+      cancel();
+      const filename = saveRaw('openmeteo', data);
+      log.info('fetch', `Saved raw weather data to ${filename}`);
+      return data;
+    } catch (err) {
+      cancel();
+      throw err;
     }
-
-    const data = await res.json();
-    const filename = saveRaw('openmeteo', data);
-    log.info('fetch', `Saved raw weather data to ${filename}`);
-    return data;
   });
 }

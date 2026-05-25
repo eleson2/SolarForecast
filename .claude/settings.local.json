@@ -134,7 +134,14 @@
       "PowerShell(fsutil fsinfo *)",
       "PowerShell(Get-Volume *)",
       "Bash(awk -F: 'NR>=90330 && NR<=90400')",
-      "PowerShell(nssm *)"
+      "PowerShell(nssm *)",
+      "PowerShell(Get-Content \"G:\\\\projects\\\\SolarForecast\\\\logs\\\\app.log\" -Tail 3000 | Select-String -Pattern \"\\(charge_grid|soc.replan|override|deviation|force.charg|replan|ERROR|WARN|soc_replan_min\\)\" | Where-Object { $_ -match \"2026-05-25\" } | Select-Object -First 100)",
+      "Bash(Get-Content \"G:\\\\projects\\\\SolarForecast\\\\logs\\\\app.log\")",
+      "Bash(Select-String -Pattern \"2026-05-24 1[01]:\")",
+      "Bash(Select-Object -First 100)",
+      "Bash(nssm restart *)",
+      "Bash(Start-Sleep -Seconds 3)",
+      "Bash(nssm status *)"
     ]
   }
 }
