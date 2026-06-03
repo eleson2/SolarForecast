@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Agent, fetch } from 'undici';
 import config from '../config.js';
 import log from './logger.js';
 
@@ -36,8 +37,24 @@ export function saveRaw(prefix, data) {
 
 const FETCH_TIMEOUT_MS = 30_000;
 
+// Dedicated HTTP dispatcher for outbound weather API calls.
+// Socket-level timeouts (connect/headers/body) reliably tear down a stalled connection —
+// unlike a JS AbortController timer, which can be frozen while the host is asleep and then
+// never fire, leaving the request hung forever. A bounded connection pool also prevents a
+// stall from exhausting all sockets and permanently wedging every subsequent request (the
+// "fetch storm" failure mode observed 2026-06-03). See todo-ops.md.
+export const httpDispatcher = new Agent({
+  connect: { timeout: 10_000 },
+  headersTimeout: FETCH_TIMEOUT_MS,
+  bodyTimeout: FETCH_TIMEOUT_MS,
+  keepAliveTimeout: 10_000,
+  keepAliveMaxTimeout: 10_000,
+  connections: 8,
+});
+
 // Returns { signal, cancel } — pass signal to fetch(), call cancel() when done to clear
 // the timer. The signal covers both headers and body so body-read hangs are also cut off.
+// Secondary guard; httpDispatcher's socket-level timeouts are the primary protection.
 export function makeTimeoutSignal() {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -58,7 +75,7 @@ export async function fetchWeather() {
     try {
       log.info('fetch', `GET ${url}`);
       const t0 = Date.now();
-      const res = await fetch(url, { signal });
+      const res = await fetch(url, { signal, dispatcher: httpDispatcher });
       log.info('fetch', `${res.status} in ${Date.now() - t0}ms`);
       if (!res.ok) throw new Error(`Open-Meteo request failed: ${res.status} ${res.statusText}`);
       const data = await res.json();

@@ -98,6 +98,17 @@ const server = app.listen(PORT, () => {
   log.info('scheduler', `Solar Forecast API running on port ${PORT}`);
   log.info('scheduler', `Cron jobs: fetch (6h), learn (1h), smooth (24h), battery (${dayAheadHour}:15 + hourly), consumption (:05), execute (15min)`);
 });
+// Fail loudly (not via an unhandled 'error' crash) if the port is taken — this means a second
+// instance is running (e.g. a duplicate service). Without this, the duplicate crash-loops and
+// each launch fires the startup pipelines, producing a "fetch storm". See todo-ops.md.
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    log.error('scheduler', `Port ${PORT} already in use — another SolarForecast instance is already running. Exiting this duplicate.`);
+  } else {
+    log.error('scheduler', 'HTTP server error', err);
+  }
+  process.exit(1);
+});
 
 // --- Initial pipelines on startup ---
 // Independent non-inverter tasks run in parallel

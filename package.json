@@ -14,6 +14,7 @@
     "express-basic-auth": "^1.2.1",
     "highs": "^1.8.0",
     "modbus-serial": "^8.0.23",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "undici": "^8.3.0"
   }
 }

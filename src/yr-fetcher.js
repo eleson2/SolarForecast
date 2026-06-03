@@ -1,5 +1,6 @@
+import { fetch } from 'undici';
 import config from '../config.js';
-import { withRetry, saveRaw, makeTimeoutSignal } from './fetcher.js';
+import { withRetry, saveRaw, makeTimeoutSignal, httpDispatcher } from './fetcher.js';
 import log from './logger.js';
 
 export async function fetchYr() {
@@ -13,6 +14,7 @@ export async function fetchYr() {
       const t0 = Date.now();
       const res = await fetch(url, {
         signal,
+        dispatcher: httpDispatcher,
         headers: { 'User-Agent': 'SolarForecast/1.0 erland.lestander@gmail.com' },
       });
       log.info('yr-fetch', `${res.status} in ${Date.now() - t0}ms`);

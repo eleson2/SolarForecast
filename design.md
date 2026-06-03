@@ -191,6 +191,18 @@ data/raw/openmeteo_YYYYMMDD_HHMM.json
 The timestamp in the filename is when the fetch occurred, not the forecast period.
 Raw files are retained for at least a few months for debugging and replay.
 
+Outbound weather requests (Open-Meteo and YR) use a dedicated undici `Agent`
+(`httpDispatcher` in `fetcher.js`) with socket-level connect/headers/body timeouts and a
+bounded connection pool. This is defensive: socket-level timeouts reliably tear down a
+stalled connection (where a JS `AbortController` timer can be delayed/frozen across an OS
+suspend), and the bounded pool prevents a stall from wedging every subsequent request.
+
+`scheduler.js` also guards `app.listen` against `EADDRINUSE`: if the port is already bound,
+it logs a clear message and exits instead of crash-looping. This was added after a stray
+**duplicate service** (`solar-forecast` alongside the real `SolarForecast`) was found
+crash-looping on the port, each restart firing the startup fetch and producing a "fetch
+storm" (diagnosed 2026-06-03; see `todo-ops.md`).
+
 ### 2. Parse
 `parser.js` reads raw JSON files and writes hourly irradiance values to `solar_readings`.
 This decouples the weather source — switching from Open-Meteo to another provider

@@ -141,7 +141,20 @@
       "Bash(Select-Object -First 100)",
       "Bash(nssm restart *)",
       "Bash(Start-Sleep -Seconds 3)",
-      "Bash(nssm status *)"
+      "Bash(nssm status *)",
+      "Bash(awk '/2026-06-02T08/{f=1} f' logs/app.log)",
+      "Bash(awk '/2026-06-02 08/{f=1} f' logs/app.log)",
+      "Bash(awk '{print $1, $2, $0}')",
+      "Bash(awk '/2026-06-03 07/{f=1} f' logs/app.log)",
+      "Bash(awk '/2026-06-03 04/{f=1} /2026-06-03 05/{f=0} f' logs/app.log)",
+      "Bash(awk '/2026-06-03 04:14/{f=1} /2026-06-03 04:17/{f=0} f' logs/app.log)",
+      "Bash(awk '/2026-06-03 04:14/{f=1} /2026-06-03 04:19/{f=0} f' logs/app.log)",
+      "PowerShell(Get-CimInstance *)",
+      "Bash(awk *)",
+      "Bash(xargs -I{} sed -n '{},+18p' logs/app.log)",
+      "Bash(xargs '-I{}' sed -n '{},$p' logs/app.log)",
+      "Read(//tmp/**)",
+      "Bash(echo \"\\(count: $\\(awk '/2026-06-03 08:13:20.*API running/{f=1} f' logs/app.log)"
     ]
   }
 }
