@@ -52,6 +52,8 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | LP noise threshold        | Done        | `NOISE_W` reduced from 50W to 10W — previously suppressed up to 12.5 Wh/slot of valid operations |
 | Consumption EV filter     | Done        | `consumptionPipeline`: if `ev.enabled` and total load > `max_house_w`, stores house-only portion (`total − ev.charge_watts`, min 100 W) tagged `'inverter_delta_ev'`. `estimateConsumption` Path 2: if yesterday's reading > `max_house_w` (legacy guard, still active when `ev.enabled=false`), falls back to `flat_watts`. |
 | Midnight-reset consumption fix | Done   | `consumptionPipeline`: when the inverter daily counter resets at midnight the first snapshot has near-zero energy, making the 23:00 delta unreliable. If `midnightReset && totalW < flat_watts × 0.2`, logs a warning and writes `flat_watts` tagged `'flat_fallback'` instead of storing 0W. |
+| Expected-SOC forecast line | Done        | Dashboard "Battery Schedule — Next 24 h" chart plots an **Expected SOC %** line instead of the raw planned SOC. The LP is economically indifferent about *when* to store free solar, so it often defers solar charging and leaves the planned SOC flat through the solar day. `battery-api.js` `computeSocForecast()` re-simulates the real load-first / self-consumption behaviour (surplus solar = `solar_watts − consumption_watts` charges the battery as it arrives, on top of forced grid charge / discharge, bounded by `max_charge_w` and `[discharge_soc, max_soc]`). **Display only** — does not touch the optimizer or what is dispatched. The LP's planned SOC is still shown in the tooltip. |
+| Multi-hour gap fill        | Done        | `consumptionPipeline`: when the inverter/host is offline for several hours, the next snapshot's cumulative-counter delta spans the whole gap and would otherwise spike one hour. When `snapPrevAge > 65` min, the accumulated PV energy is distributed across the empty hours weighted by each hour's `prod_forecast` (even split if no forecast), and the load energy is split evenly, tagged `source = 'inverter_gap_fill'`. No energy is lost (counters are cumulative); only attribution is corrected, keeping `prod_actual` and the correction matrix clean. **Edge cases:** (1) cross-midnight gaps are detected (`crossedMidnight` = different date, or `pvNow < pvPrev`, or load counter drop) — since daily counters reset at midnight, only *today's* portion (`pvNow`/`loadNow`) is reconstructed and distributed from 00:00; the unrecoverable pre-midnight tail is left NULL so the learner skips it rather than ingesting a spike. (2) Nothing accumulated (frozen snapshot during an ongoing outage) → falls through to the single-hour path. (3) Night gaps with no PV still distribute house load. (4) Degenerate `hourCount < 1` is skipped. |
 | Cloud-irradiance cap      | Done        | `model.js`: when `cloud_pct_threshold (30%) ≤ cloud_cover ≤ cloud_pct_max (65%)` AND `irr_forecast ≥ irr_wm2_threshold (400 W/m²)`, caps `prod_forecast` at `cap_factor (0.80)` × physics baseline. Targets the "conflicting signals" zone where patchy cloud meets high irradiance forecasts. Heavy overcast (cloud > 65%) is excluded — cloudFactor already handles it, and high-diffuse overcast can exceed the physics baseline legitimately. Logs when it fires. Config: `learning.cloud_irradiance_cap`. |
 | charge_grid price ceiling | Done        | `optimizer-lp.js`: `config.battery.charge_grid_max_buy_price` (default `null` = disabled). When set, slots with `buy_price > threshold` have their `cg_t` upper bound zeroed, preventing grid charging at clearly expensive prices. |
 | Min-SOC idle window warning | Done      | `optimizer-lp.js`: after solving, scans schedule for consecutive slots at `min_soc ± 1%`. If the run exceeds 4 hours, logs a WARN with the time range so the operator knows the SOC deviation guard may trip on unexpected load. |
@@ -315,6 +317,26 @@ export default {
         // optimizer's planned soc_start for the current slot, a full replan is triggered.
         soc_deviation_threshold: 8,
     },
+```
+
+### Changing battery hardware (capacity / power)
+
+Replacing or expanding the battery is a **single edit in `config.js`** — no code or
+database change. State of charge is stored and handled as a **percentage** everywhere
+(`battery_schedule.soc_start`/`soc_end`, `energy_snapshots.battery_soc`), and capacity is
+converted to Wh at runtime (`capacityWh = capacity_kwh * 1000` in `optimizer-lp.js` and
+`battery-api.js`). Nothing learns or persists the capacity, and the Modbus driver reads
+SOC% straight from the BMS, so historical rows stay valid and the new value takes effect on
+the next optimizer run.
+
+- New pack capacity → update `battery.capacity_kwh`.
+- New charge/discharge power rating → update `battery.max_charge_w` / `max_discharge_w`
+  (these are power limits, independent of capacity — leave them if only capacity changed).
+- `min_soc`/`max_soc`/`charge_soc`/`discharge_soc` are percentages and need no change.
+
+The config watcher (`scheduler.js`) restarts the service automatically after the edit.
+
+```javascript
     grid: {
         sell_enabled: false,         // can sell back to grid?
         sell_price_factor: 0.80,     // % of spot price received when selling

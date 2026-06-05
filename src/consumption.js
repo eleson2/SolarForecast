@@ -6,6 +6,7 @@ import {
   updateActual,
   getSnapshotAtOrBefore,
   getSnapshotsForRange,
+  getSolarReadingsForRange,
   recordPipelineRun
 } from './db.js';
 import { localTs } from './timeutils.js';
@@ -241,6 +242,89 @@ export async function runConsumptionPipeline() {
         log.info('consumption', `${prevHourTs}: load=flat_fallback (${config.consumption.flat_watts}W), PV=${deltaPv.toFixed(2)}kWh, temp=${outdoorTemp}°C`);
         recordPipelineRun('consumption');
         return;
+      }
+
+      // ── Multi-hour gap fill ───────────────────────────────────────────────────
+      // If the previous snapshot is stale by more than one hour, the inverter (or
+      // host) was offline and this single delta actually spans the whole gap.
+      // Cumulative daily counters mean no energy is lost, but attributing it all to
+      // one hour creates an unrealistic spike that pollutes prod_actual and the
+      // correction matrix. Spread the accumulated energy across the empty hours:
+      // PV weighted by each hour's prod_forecast (even split if no forecast), load
+      // split evenly, tagged 'inverter_gap_fill'.
+      //
+      // Daily counters reset at midnight, so a raw delta is only meaningful within a
+      // single calendar day. If the gap crossed midnight we can still reconstruct
+      // *today's* portion — the counters already hold energy-since-midnight
+      // (pvNow / loadNow) — and distribute it from 00:00. The pre-midnight tail is
+      // unrecoverable from two readings and is left untouched (stays NULL, so the
+      // learner simply skips those hours rather than ingesting a spike).
+      if (snapPrevAge > 65) {
+        const crossedMidnight =
+          snapNow.snapshot_ts.slice(0, 10) !== snapPrev.snapshot_ts.slice(0, 10)
+          || pvNow < pvPrev
+          || snapNow.load_today_kwh < snapPrev.load_today_kwh;
+
+        const pvToDistribute   = crossedMidnight ? pvNow : pvNow - pvPrev;
+        const loadToDistribute = crossedMidnight
+          ? snapNow.load_today_kwh
+          : snapNow.load_today_kwh - snapPrev.load_today_kwh;
+
+        // Nothing accumulated (e.g. ongoing outage with a frozen snapshot, or a
+        // negative artefact) — let the normal single-hour path handle it.
+        if (pvToDistribute > 0 || loadToDistribute > 0) {
+          // Format a Date back into a "YYYY-MM-DDTHH:00" hour label using the same
+          // (system-local) components new Date() parsed from the timestamp string, so
+          // the round-trip is timezone-independent and matches the stored hour_ts.
+          const fmtHour = (d) => {
+            const p = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:00`;
+          };
+
+          // First gap hour: the hour containing snapPrev, or today's 00:00 if the gap
+          // crossed midnight. Last gap hour: prevHour.
+          const firstGap = crossedMidnight
+            ? new Date(snapNow.snapshot_ts)
+            : new Date(snapPrev.snapshot_ts);
+          if (crossedMidnight) firstGap.setHours(0, 0, 0, 0);
+          else firstGap.setMinutes(0, 0, 0);
+
+          const lastGap = new Date(prevHourTs);
+          const hourCount = Math.round((lastGap - firstGap) / 3600000) + 1;
+
+          if (hourCount >= 1) {
+            const gapHours = [];
+            for (let i = 0; i < hourCount; i++) {
+              gapHours.push(fmtHour(new Date(firstGap.getTime() + i * 3600000)));
+            }
+
+            // PV weights from forecast shape (clamp ≥0); even split if no forecast.
+            const fcByHour = {};
+            for (const r of getSolarReadingsForRange(gapHours[0], prevHourTs)) {
+              fcByHour[r.hour_ts] = Math.max(0, r.prod_forecast ?? 0);
+            }
+            let weightSum = 0;
+            for (const h of gapHours) weightSum += (fcByHour[h] ?? 0);
+
+            const loadPerHourW = Math.round(loadToDistribute * 1000 / hourCount);
+
+            for (const h of gapHours) {
+              const pvShare = weightSum > 0
+                ? pvToDistribute * ((fcByHour[h] ?? 0) / weightSum)
+                : pvToDistribute / hourCount;
+              updateActual(h, pvShare);
+              upsertConsumption(h, loadPerHourW, outdoorTemp, 'inverter_gap_fill');
+            }
+
+            log.warn('consumption',
+              `Gap fill${crossedMidnight ? ' (post-midnight portion)' : ''}: distributed `
+              + `PV=${pvToDistribute.toFixed(2)}kWh, load=${loadToDistribute.toFixed(2)}kWh `
+              + `across ${hourCount}h (${gapHours[0]}→${prevHourTs}), `
+              + `weighting=${weightSum > 0 ? 'forecast' : 'even'}`);
+            recordPipelineRun('consumption');
+            return;
+          }
+        }
       }
 
       // ── Sub-hourly EV detection ───────────────────────────────────────────────

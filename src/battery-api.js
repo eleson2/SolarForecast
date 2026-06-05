@@ -36,6 +36,55 @@ function localTs(date) {
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
 
+/**
+ * Re-simulate the SOC trajectory the way the inverter physically behaves
+ * (load-first / self-consumption): surplus solar charges the battery as soon as it
+ * is available, on top of whatever the dispatched action forces (grid charge or
+ * discharge/sell). Returns one expected-SOC % value (1 decimal) per row.
+ *
+ * This is display-only — it does not change the optimizer or what is written to
+ * hardware. It exists because the LP is indifferent about *when* to store free
+ * solar and often defers it, leaving the planned SOC flat through the solar day.
+ */
+function computeSocForecast(rows) {
+  const bat = config.battery;
+  const h = 0.25; // hours per 15-min slot
+  const capacityWh = bat.capacity_kwh * 1000;
+  const eta        = bat.efficiency;
+  const maxChargeW = bat.max_charge_w;
+  const minSocWh   = ((config.inverter?.discharge_soc ?? bat.min_soc) / 100) * capacityWh;
+  const maxSocWh   = (bat.max_soc / 100) * capacityWh;
+
+  const out = new Array(rows.length).fill(null);
+  if (!rows.length) return out;
+
+  const clamp = (wh) => Math.max(minSocWh, Math.min(maxSocWh, wh));
+  let socWh = clamp(((rows[0].soc_start ?? 0) / 100) * capacityWh);
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const surplusW = Math.max(0, (r.solar_watts ?? 0) - (r.consumption_watts ?? 0));
+    let chargeW = 0, dischargeW = 0;
+    switch (r.action) {
+      case 'charge_grid':
+        chargeW = (r.watts ?? 0) + surplusW; // forced grid charge + passive solar
+        break;
+      case 'discharge':
+      case 'sell':
+        dischargeW = r.watts ?? 0;
+        chargeW = surplusW; // rarely both, but harmless
+        break;
+      default: // idle / charge_solar — battery holds, but surplus solar still charges it
+        chargeW = surplusW;
+        break;
+    }
+    chargeW = Math.min(chargeW, maxChargeW);
+    socWh = clamp(socWh + eta * chargeW * h - dischargeW * h);
+    out[i] = Math.round((socWh / capacityWh) * 1000) / 10;
+  }
+  return out;
+}
+
 router.get('/schedule', (req, res) => {
   const now = new Date();
   const currentSlot = new Date(now);
@@ -46,6 +95,15 @@ router.get('/schedule', (req, res) => {
   const toTs = localTs(endSlot);
 
   const rows = getScheduleForRange(fromTs, toTs);
+
+  // Realistic "expected" SOC trajectory for the forecast chart (display only).
+  // The LP is economically indifferent about WHEN to store free solar, so it often
+  // defers solar charging — leaving the planned SOC flat through the solar day. The
+  // real inverter runs load-first / self-consumption: surplus solar charges the
+  // battery as soon as it is available. Re-simulate that physical behaviour so the
+  // chart shows SOC climbing during the day. This does NOT affect the optimizer or
+  // what is dispatched to hardware — it only annotates each slot for display.
+  const socForecast = computeSocForecast(rows);
 
   // Compute savings summary from the rows
   let costWithout = 0;
@@ -93,7 +151,7 @@ router.get('/schedule', (req, res) => {
         date_ranges: config.peak_shaving?.date_ranges ?? [],
       },
     },
-    schedule: rows.map(r => ({
+    schedule: rows.map((r, i) => ({
       slot: r.slot_ts,
       action: r.action,
       watts: r.watts,
@@ -102,6 +160,7 @@ router.get('/schedule', (req, res) => {
       consumption_watts: r.consumption_watts,
       soc_start: r.soc_start,
       soc_end: r.soc_end,
+      soc_forecast: socForecast[i],
     })),
     summary: {
       estimated_cost_without_battery: Math.round(costWithout * 100) / 100,

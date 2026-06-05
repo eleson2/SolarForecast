@@ -64,8 +64,8 @@ export default {
         max_charge_w: 7500,
         max_discharge_w: 7500,
         efficiency: 0.90,
-        min_soc: 10,
-        max_soc: 95,
+        min_soc: 8,
+        max_soc: 100,
         // Small penalty for holding SOC during the pre-sunrise window (3 h before first solar slot).
         // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
         // Expressed as a fraction of the average buy price — 0 disables, 0.3 is a gentle nudge.

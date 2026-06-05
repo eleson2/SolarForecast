@@ -334,7 +334,7 @@ The battery optimizer adds three more tables — documented in detail in
 [`battery-optimizer.md`](battery-optimizer.md):
 
 - **`price_readings`** — spot prices at 15-min resolution (slot_ts, spot_price, region)
-- **`consumption_readings`** — hourly household consumption with outdoor temperature (hour_ts, consumption_w, outdoor_temp, source); `source` is `inverter_delta` when derived from energy snapshots
+- **`consumption_readings`** — hourly household consumption with outdoor temperature (hour_ts, consumption_w, outdoor_temp, source); `source` is `inverter_delta` when derived from energy snapshots, or `inverter_gap_fill` when back-filled across a multi-hour offline gap (PV weighted by forecast shape, load split evenly)
 - **`energy_snapshots`** — 15-min snapshots of daily cumulative energy totals from inverter (snapshot_ts, pv_today_kwh, load_today_kwh, grid_import_today_kwh, grid_export_today_kwh)
 - **`battery_schedule`** — optimizer output: 15-min slots with action, watts, SOC tracking, prices
 
