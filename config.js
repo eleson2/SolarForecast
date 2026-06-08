@@ -97,6 +97,20 @@ export default {
         // preventing the optimizer from charging at obviously expensive prices.
         // null = no ceiling (backward-compatible default).
         charge_grid_max_buy_price: null,
+        // Safety margin (percentage points ABOVE min_soc) the optimizer protects
+        // with grid charging. The margin SOC is  min_soc + grid_charge_floor_buffer_soc
+        // (currently 8 + 5 = 13%).
+        // Grid charge is only allowed when the battery cannot otherwise bridge to
+        // the next solar-production onset (sunrise) while staying at/above this
+        // margin — i.e. floor protection only. Above it, the optimizer never
+        // grid-charges for arbitrage/hedging (e.g. buying cheap pre-dawn when SOC
+        // can ride to sunrise). Robust to solar under-forecast: the pre-solar
+        // bridge depends on current SOC and near-term load, not on the uncertain
+        // solar magnitude — on a genuinely cloudy day the battery rides down
+        // toward the margin and imports directly rather than pre-buying.
+        // 0 = protect exactly min_soc; 5 = keep a 5-point reserve above it.
+        // null disables the gate (legacy arbitrage behaviour).
+        grid_charge_floor_buffer_soc: 5,
         // If actual SOC falls this many percentage points below the optimizer's plan,
         // a full replan is triggered so the optimizer can pick the cheapest recovery slot.
         soc_deviation_threshold: 8,
@@ -169,7 +183,7 @@ export default {
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.
         charge_soc: 90,                           // SOC floor when charging (high = battery fills up)
-        discharge_soc: 15,                        // SOC floor when discharging (low = battery empties)
+        discharge_soc: 8,                         // SOC floor when discharging (low = battery empties); matches battery.min_soc — grid-charge gate protects min_soc + grid_charge_floor_buffer_soc (13%) above this
 
         // --- Growatt cloud API settings (used when brand = 'growatt') ---
         // server: 'https://openapi.growatt.com/',

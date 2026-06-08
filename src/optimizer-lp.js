@@ -198,6 +198,15 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     ? Math.max(minSocWh, Math.min(maxSocWh, (options.startSoc / 100) * capacityWh))
     : minSocWh;
 
+  // Floor-protection grid-charge gate: only grid-charge when the battery cannot
+  // bridge to the next solar-production onset above this safety margin. The margin
+  // is min_soc plus a configurable buffer in SOC points.
+  // null disables the gate (legacy arbitrage-charging behaviour).
+  const gridChargeFloorBuffer = bat.grid_charge_floor_buffer_soc ?? null;
+  const marginWh = gridChargeFloorBuffer != null
+    ? Math.min(maxSocWh, ((bat.min_soc + gridChargeFloorBuffer) / 100) * capacityWh)
+    : null;
+
   if (options.startSoc != null) {
     console.log(`[optimizer-lp] Starting SOC: ${options.startSoc}% (${Math.round(startSocWh)} Wh)`);
   } else {
@@ -400,6 +409,54 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     }
   }
 
+  // ── Grid-charge gate (floor-protection only) ─────────────────────────────────
+  //
+  // Build a baseline SOC trajectory assuming NO grid charging — solar surplus
+  // charges the battery (×etaH, capped at maxSocWh), consumption deficit
+  // discharges it (tracked below the margin so breaches are detectable). For each
+  // slot, grid charging is permitted ONLY if, without it, SOC would fall below the
+  // safety margin before the next solar-relief slot (solar ≥ consumption). When the
+  // battery can bridge to solar relief above the margin, the gate is closed (no
+  // grid charge) — this suppresses arbitrage/hedge buying like the pre-dawn charge
+  // that prompted this feature. Robust to solar under-forecast because the
+  // pre-solar bridge carries ~zero solar.
+  const cgGateOpen = new Array(N).fill(true);
+  if (marginWh != null) {
+    // Baseline no-grid-charge SOC at the START of each slot (length N+1).
+    const baseSoc = new Array(N + 1);
+    baseSoc[0] = startSocWh;
+    for (let t = 0; t < N; t++) {
+      const surplus = Math.max(0, slots[t].solar_watts - slots[t].consumption_watts);
+      const deficit = Math.max(0, slots[t].consumption_watts - slots[t].solar_watts);
+      const chgW = Math.min(bat.max_charge_w, surplus);
+      const disW = Math.min(bat.max_discharge_w, deficit);
+      // Cap charge at maxSoc; allow discharge to track below the margin (no floor clamp).
+      const next = baseSoc[t] + etaH * chgW - h * disW;
+      baseSoc[t + 1] = Math.min(maxSocWh, next);
+    }
+    // A slot offers "solar relief" once the sun is up (any real production).
+    // Onset timing is robust to solar-magnitude under-forecast — the user accepts
+    // riding the battery low on a genuinely cloudy day rather than pre-buying.
+    const isRelief = slots.map(s => s.solar_watts >= MIN_SOLAR_W);
+    // For each slot, scan forward to the next relief slot; gate closed if SOC
+    // stays at/above the margin across that bridge.
+    for (let t = 0; t < N; t++) {
+      let breach = false;
+      for (let u = t; u < N; u++) {
+        if (isRelief[u]) break;            // reached solar relief without breaching
+        if (baseSoc[u + 1] < marginWh) { breach = true; break; }
+      }
+      cgGateOpen[t] = breach;
+    }
+    const closed = cgGateOpen.filter(o => !o).length;
+    const effPct = (marginWh / capacityWh * 100).toFixed(0);
+    const minBaseSocPct = (Math.min(...baseSoc) / capacityWh * 100).toFixed(1);
+    console.log(`[optimizer-lp] Grid-charge gate: margin ${effPct}% ` +
+      `(min_soc ${bat.min_soc}% + buffer ${gridChargeFloorBuffer}%) ` +
+      `— ${closed}/${N} slots closed (no grid charge), ${N - closed} open` +
+      ` (baseline min SOC ${minBaseSocPct}%)`);
+  }
+
   // Variable bounds
   const boundLines = [];
 
@@ -418,7 +475,8 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
                              Math.max(0, slots[t].solar_watts - slots[t].consumption_watts));
     const psLimitW = peakShavingImportW(slots[t].slot_ts);
     const priceOk  = bat.charge_grid_max_buy_price == null || slots[t].buy_price <= bat.charge_grid_max_buy_price;
-    const maxCgW   = priceOk ? Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts)) : 0;
+    const maxCgW   = (priceOk && cgGateOpen[t])
+      ? Math.max(0, Math.min(bat.max_charge_w, psLimitW - slots[t].consumption_watts)) : 0;
     const maxSellW = effectiveSellEnabled && slots[t].sell_price > 0
       ? Math.min(isFinite(capW) ? capW : bat.max_discharge_w, bat.max_discharge_w) : 0;
     boundLines.push(`  0 <= cg_${t} <= ${maxCgW.toFixed(4)}`);
