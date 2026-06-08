@@ -65,7 +65,7 @@ export default {
         max_discharge_w: 7500,
         efficiency: 0.90,
         min_soc: 8,
-        max_soc: 100,
+        max_soc: 100, 
         // Small penalty for holding SOC during the pre-sunrise window (3 h before first solar slot).
         // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
         // Expressed as a fraction of the average buy price — 0 disables, 0.3 is a gentle nudge.
@@ -114,6 +114,14 @@ export default {
         // If actual SOC falls this many percentage points below the optimizer's plan,
         // a full replan is triggered so the optimizer can pick the cheapest recovery slot.
         soc_deviation_threshold: 8,
+        // Optimization horizon in hours (rolling window from "now"). 24 = legacy
+        // behaviour; 48 lets the optimizer see the upcoming night when planning
+        // daytime charging, so it can fill the battery during cheap hours to cover
+        // an expensive night instead of discovering the need only the next morning.
+        // The effective span is still capped by how many price slots are published
+        // (next-day prices arrive ~13:00), so before then it naturally runs shorter.
+        // Only affects batteryPipeline; dispatch/snapshot still use the current slot.
+        optimizer_window_hours: 48,
     },
     grid: {
         // Set sell_enabled: true to allow the optimizer to plan battery→grid export slots.

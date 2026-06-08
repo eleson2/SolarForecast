@@ -64,12 +64,16 @@ export function calendarDayDistance(m1, d1, m2, d2) {
 
 /**
  * Returns the current 15-minute slot window as local timestamp strings.
+ * @param {string} timezone
+ * @param {number} [horizonHours=24] window length. The optimizer passes a longer
+ *   horizon (e.g. 48 h) so it can see the upcoming night when planning daytime
+ *   charging; the actual span is still capped by however many price slots exist.
  */
-export function currentWindow(timezone) {
+export function currentWindow(timezone, horizonHours = 24) {
   const now = new Date();
   const currentSlot = new Date(now);
   currentSlot.setMinutes(Math.floor(now.getMinutes() / 15) * 15, 0, 0);
-  const endSlot = new Date(currentSlot.getTime() + 24 * 60 * 60 * 1000);
+  const endSlot = new Date(currentSlot.getTime() + horizonHours * 60 * 60 * 1000);
   return {
     currentSlot,
     fromTs: localTs(currentSlot, timezone),

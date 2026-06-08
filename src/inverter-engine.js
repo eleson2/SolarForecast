@@ -68,7 +68,8 @@ export async function batteryPipeline() {
     log.info('battery', 'Starting battery optimizer pipeline');
     await fetchPrices();
 
-    const { currentSlot, fromTs, toTs } = currentWindow(config.location.timezone);
+    const optimizerHorizonH = config.battery.optimizer_window_hours ?? 24;
+    const { currentSlot, fromTs, toTs } = currentWindow(config.location.timezone, optimizerHorizonH);
     const consumption = await estimateConsumption(currentSlot);
 
     // Read live SOC from inverter if available
