@@ -436,14 +436,20 @@ export async function runOptimizer(fromTs, toTs, consumptionEstimates, options =
     }
     // A slot offers "solar relief" once the sun is up (any real production).
     // Onset timing is robust to solar-magnitude under-forecast — the user accepts
-    // riding the battery low on a genuinely cloudy day rather than pre-buying.
+    // riding the battery low rather than pre-buying *before* sunrise.
     const isRelief = slots.map(s => s.solar_watts >= MIN_SOLAR_W);
-    // For each slot, scan forward to the next relief slot; gate closed if SOC
-    // stays at/above the margin across that bridge.
+    // The gate only restricts the PRE-SUNRISE (night) window — that is where the
+    // wasteful pre-dawn hedge occurs. Daylight slots stay OPEN so the LP can decide
+    // on normal economics: on a sunny day it charges from free solar surplus (no
+    // grid charge); on a heavily overcast day (solar < consumption, no surplus) it
+    // can still charge cheaply from the grid to cover an expensive evening/night.
+    // For each pre-sunrise slot, scan forward to the next solar onset; gate is
+    // closed only if baseline SOC stays at/above the margin across that bridge.
     for (let t = 0; t < N; t++) {
+      if (isRelief[t]) { cgGateOpen[t] = true; continue; }  // daylight — LP decides
       let breach = false;
       for (let u = t; u < N; u++) {
-        if (isRelief[u]) break;            // reached solar relief without breaching
+        if (isRelief[u]) break;            // reached sunrise without breaching
         if (baseSoc[u + 1] < marginWh) { breach = true; break; }
       }
       cgGateOpen[t] = breach;
