@@ -720,6 +720,16 @@ Reg 3038 (Grid First) is written as `2` for sell slots when `grid.sell_enabled: 
 
 This runs every 15 minutes (via `executePipeline` in the scheduler), so both registers are continuously adjusted to match the current optimizer slot.
 
+**Register writes use FC16 (preset-multiple), via the `writeHolding(conn, reg, value, label)`
+helper.** Each control write only ever sets one register, so FC06 (write-single) would be the
+natural choice — but this datalogger **rejects FC06 with `Modbus exception 1: Illegal function`**
+(confirmed by live test 2026-06-11; it does not implement single-register writes). FC16 is the
+only supported write path. The helper's value is its **error annotation**: on failure it
+rewrites the message with the function code, register and value so the log identifies exactly
+which write failed (e.g. `FC16 write to holding 3310 (LoadFirstStopSoc)=8 failed: …`). This does
+**not** resolve the intermittent `Modbus exception 0` write failures — that root cause is still
+open (see *Transient error handling* below).
+
 ### Grid First sell mode
 
 In Load First mode, battery export is passive — it only occurs when PV surplus overflows a full battery. After sunset, no export happens regardless of the schedule's `sell` slots.
@@ -780,11 +790,34 @@ After all retries are exhausted, the error propagates to the caller.
 
 When `executePipeline` catches a Modbus error:
 
-- **Transient** (`ETIMEDOUT`, `ECONNREFUSED`, `timed out`): the inverter likely continued
-  operating on the last-written register value. The pipeline logs a warning and exits
-  **without** calling `resetToDefault` — interrupting an active charge/discharge for no
-  reason would be worse than leaving the inverter alone.
-- **Hard protocol errors**: `resetToDefault` is called as before.
+- **Transient** (`ETIMEDOUT`, `ECONNREFUSED`, `timed out`, **`Modbus exception`**): the
+  inverter continued operating on the last-written register value. The pipeline logs a
+  warning and exits **without** calling `resetToDefault` — interrupting an active
+  charge/discharge for no reason would be worse than leaving the inverter alone.
+- **Hard protocol errors** (anything else): `resetToDefault` is called as before.
+
+**Why `Modbus exception` is treated as transient:** a failed write changes nothing on the
+inverter, so there is no unsafe state to reset. Classing it as a hard error (the original
+behaviour) fired `resetToDefault()` on every failed cycle, which issued *two more* writes
+(regs 3038 + 3310, each retried) and filled the log with `reset also failed` storms. We now
+leave the last-written state and retry next cycle. (Caveat: sell mode is disabled, so a
+partial apply cannot leave Grid First TOU enabled. If sell is ever enabled, revisit whether
+a reset is needed when only the TOU write succeeded.)
+
+**Root-cause update (2026-06-11):** the `Modbus exception 0` failures were originally
+attributed to RS485 contention with the datalogger's cloud uplink. That was wrong — the
+signature is function-code-specific: same-socket FC04 reads succeed in the very cycle the
+FC16 write fails, and writes via the Growatt cloud path (ShinePhone) succeed throughout. The
+exception code `0` is not a valid Modbus exception — it is a malformed/desynced response
+frame from FC16 (preset-multiple) on this datalogger, not a device rejection.
+
+**FC06 ruled out (2026-06-11):** switching the writes to FC06 (single-register) was tried as
+a fix; the datalogger rejects FC06 entirely with `Modbus exception 1: Illegal function`, so
+FC16 is mandatory. The diagnostic logging from that attempt was kept (it now names the
+failing register). **Root cause of the intermittent FC16 `exception 0` is still unresolved.**
+Next angles to investigate: stale-response/frame desync on the persistent socket (try a fresh
+connection or buffer flush before each write), a longer inter-command gap, or a higher
+`timeout_ms` so late responses aren't orphaned into the next request.
 
 ### Last-known SOC fallback
 

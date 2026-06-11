@@ -275,9 +275,20 @@ export async function executePipeline() {
     return triggerReplan;
   } catch (err) {
     log.error('execute', 'Inverter execution error', err);
-    const isTransient = /timed out|timeout|ECONNREFUSED|ETIMEDOUT/i.test(err.message);
+    // Transient datalogger faults: leave the inverter in its last state and
+    // retry next cycle. A failed write changed nothing, so there is no unsafe
+    // state to reset — and resetToDefault() would only push more writes onto an
+    // already-contended datalogger (its RS485 link to the inverter is shared
+    // with the cloud uplink), amplifying the failure into the multi-hour storms
+    // seen in the logs. "Modbus exception 0" is the datalogger returning a
+    // corrupted/garbage write response under that contention, not a real device
+    // exception, so treat it as transient too.
+    // Note: sell mode is disabled, so a write failure cannot leave Grid First
+    // TOU half-enabled; if sell is ever enabled, revisit whether reset is needed
+    // when only the TOU write succeeded.
+    const isTransient = /timed out|timeout|ECONNREFUSED|ETIMEDOUT|Modbus exception/i.test(err.message);
     if (isTransient) {
-      log.warn('execute', 'Transient connection error — leaving inverter state unchanged');
+      log.warn('execute', 'Transient datalogger error — leaving inverter state unchanged, will retry next cycle');
       return false;
     }
     try {

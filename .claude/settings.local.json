@@ -154,7 +154,9 @@
       "Bash(xargs -I{} sed -n '{},+18p' logs/app.log)",
       "Bash(xargs '-I{}' sed -n '{},$p' logs/app.log)",
       "Read(//tmp/**)",
-      "Bash(echo \"\\(count: $\\(awk '/2026-06-03 08:13:20.*API running/{f=1} f' logs/app.log)"
+      "Bash(echo \"\\(count: $\\(awk '/2026-06-03 08:13:20.*API running/{f=1} f' logs/app.log)",
+      "Bash(sc.exe query *)",
+      "Bash(findstr STATE)"
     ]
   }
 }

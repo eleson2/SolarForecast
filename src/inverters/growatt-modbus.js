@@ -6,6 +6,10 @@
  *   - holding 3310 (LoadFirstStopSocSet): discharge floor (SOC %)
  *   - holding 3038 (TOU Period 1): enable/disable Grid First sell window
  *
+ * All register writes go through writeHolding() (FC16 preset-multiple), which
+ * annotates failures with the function code, register and value. FC06 (write-
+ * single) is rejected by this datalogger ("Illegal function"). See writeHolding().
+ *
  * Same interface as growatt.js:
  *   getState(cfg), getMetrics(cfg), applySchedule(slots, cfg), resetToDefault(cfg)
  *
@@ -157,6 +161,28 @@ async function withReconnect(fn) {
     }
   }
   throw lastErr;
+}
+
+// Write a single holding register, with error context for diagnostics.
+//
+// Uses FC16 (writeRegisters / preset-multiple). FC06 (writeRegister / write-single)
+// was tried 2026-06-11 and this datalogger rejects it outright with
+// "Modbus exception 1: Illegal function" — it does not implement single-register
+// writes — so FC16 is the only supported write path even though we only ever set
+// one register per call.
+//
+// On failure the error message is annotated with the function code, register and
+// value so the log identifies exactly which write failed (the raw byte buffer is
+// not exposed by modbus-serial; modbusCode is included when present).
+async function writeHolding(conn, reg, value, label) {
+  await throttle();
+  try {
+    await conn.writeRegisters(reg, [value]);   // FC16 — preset multiple (single value)
+  } catch (err) {
+    const code = err?.modbusCode != null ? `, modbusCode=${err.modbusCode}` : '';
+    err.message = `FC16 write to holding ${reg} (${label})=${value} failed: ${err.message}${code}`;
+    throw err;
+  }
 }
 
 // --- Driver interface ---
@@ -327,12 +353,10 @@ export async function applySchedule(slots, cfg) {
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
     if (touValue !== lastTouValue) {
-      await throttle();
-      await conn.writeRegisters(REG.TOU_PERIOD_1, [touValue]);
+      await writeHolding(conn, REG.TOU_PERIOD_1, touValue, 'TOU_PERIOD_1');
       lastTouValue = touValue;
     }
-    await throttle();
-    await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [targetSoc]);
+    await writeHolding(conn, REG.LOAD_FIRST_STOP_SOC, targetSoc, 'LoadFirstStopSoc');
     console.log(`[growatt-modbus] Set TOU period 1=${touValue} (${touLabel}), LoadFirstStopSoc=${targetSoc}% (action=${action})`);
     return { applied: 1, skipped: 0 };
   });
@@ -358,8 +382,7 @@ export async function charge(cfg) {
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
-    await throttle();
-    await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [target]);
+    await writeHolding(conn, REG.LOAD_FIRST_STOP_SOC, target, 'LoadFirstStopSoc');
     return { soc: state.soc, target };
   });
 }
@@ -380,8 +403,7 @@ export async function discharge(cfg) {
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
-    await throttle();
-    await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [target]);
+    await writeHolding(conn, REG.LOAD_FIRST_STOP_SOC, target, 'LoadFirstStopSoc');
     return { soc: state.soc, target };
   });
 }
@@ -403,8 +425,7 @@ export async function idle(cfg) {
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
-    await throttle();
-    await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [target]);
+    await writeHolding(conn, REG.LOAD_FIRST_STOP_SOC, target, 'LoadFirstStopSoc');
     return { soc: state.soc, target };
   });
 }
@@ -426,10 +447,8 @@ export async function setPeakShavingTarget({ import_kw, export_kw }, cfg) {
   }
   return withReconnect(async () => {
     const conn = await getConnection(cfg);
-    await throttle();
-    await conn.writeRegisters(REG.PEAK_SHAVING_IMPORT, [importVal]);
-    await throttle();
-    await conn.writeRegisters(REG.PEAK_SHAVING_EXPORT, [exportVal]);
+    await writeHolding(conn, REG.PEAK_SHAVING_IMPORT, importVal, 'PeakShavingImport');
+    await writeHolding(conn, REG.PEAK_SHAVING_EXPORT, exportVal, 'PeakShavingExport');
     console.log(`[growatt-modbus] Set PeakShavingImport=${importVal} (${import_kw} kW), PeakShavingExport=${exportVal} (${export_kw} kW)`);
   });
 }
@@ -448,11 +467,9 @@ export async function resetToDefault(cfg) {
     const conn = await getConnection(cfg);
     // Always disable Grid First TOU period on reset — ensures it is never left
     // active after a crash or non-transient error.
-    await throttle();
-    await conn.writeRegisters(REG.TOU_PERIOD_1, [TOU_GRID_FIRST_DISABLED]);
+    await writeHolding(conn, REG.TOU_PERIOD_1, TOU_GRID_FIRST_DISABLED, 'TOU_PERIOD_1');
     lastTouValue = TOU_GRID_FIRST_DISABLED;
-    await throttle();
-    await conn.writeRegisters(REG.LOAD_FIRST_STOP_SOC, [defaultSoc]);
+    await writeHolding(conn, REG.LOAD_FIRST_STOP_SOC, defaultSoc, 'LoadFirstStopSoc');
     console.log(`[growatt-modbus] Reset TOU period 1=disabled, LoadFirstStopSoc=${defaultSoc}%`);
   });
 }
