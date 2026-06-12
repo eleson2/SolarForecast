@@ -64,7 +64,7 @@ export default {
         max_charge_w: 7500,
         max_discharge_w: 7500,
         efficiency: 0.90,
-        min_soc: 8,
+        min_soc: 14,
         max_soc: 100, 
         // Small penalty for holding SOC during the pre-sunrise window (3 h before first solar slot).
         // Nudges the LP to discharge more aggressively before dawn, leaving more room for solar.
@@ -191,7 +191,7 @@ export default {
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.
         charge_soc: 90,                           // SOC floor when charging (high = battery fills up)
-        discharge_soc: 8,                         // SOC floor when discharging (low = battery empties); matches battery.min_soc — grid-charge gate protects min_soc + grid_charge_floor_buffer_soc (13%) above this
+        discharge_soc: 14,                         // SOC floor when discharging (low = battery empties); matches battery.min_soc — grid-charge gate protects min_soc + grid_charge_floor_buffer_soc (13%) above this
 
         // --- Growatt cloud API settings (used when brand = 'growatt') ---
         // server: 'https://openapi.growatt.com/',

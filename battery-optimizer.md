@@ -786,6 +786,33 @@ times (config-driven, default 3) with `modbus_retry_delay_ms` delay (default 4 s
 attempts. The TCP client is destroyed and recreated on each retry to avoid stale state.
 After all retries are exhausted, the error propagates to the caller.
 
+**Single-operation mutex (`withLock`, added 2026-06-11).** `modbus-serial` cannot multiplex one
+client, so concurrent requests from different pipelines on the shared socket could interleave and
+desync. `withReconnect` acquires a promise-chain mutex (`withLock`) so exactly one operation — and
+its full retry sequence — runs at a time, even across independent cron jobs. Worst-case lock hold
+is one retry budget (~`modbus_retries × (timeout_ms + retry_delay)` ≈ 27 s), well within the
+15-min cadence. (Note: this was *not* the cause of the 2026-06 write-failure regime — see below —
+but it is correct hygiene for a non-multiplexable client and is kept.)
+
+**⚠️ Discharge-floor value must be ≥ the register minimum (~13%).** Reg 3310
+(`LoadFirstStopSocSet`) firmware-enforces a valid range of **13–100%** (per
+`growatt-mod-modbus-reference.md`). Writing a value below that — e.g. `inverter.discharge_soc: 8` —
+is rejected as an illegal data value, which `modbus-serial` surfaces as the misleading
+`Modbus exception 0: Unknown error`. This caused the ~100% discharge-write failure regime that
+began 2026-06-08 (commit `5bacde7` lowered `discharge_soc` 15→8). Only *discharge* slots failed
+(they write the floor value); charge/idle slots write in-range values and kept working, so the
+floor froze at its last valid value. **Fix: keep both `inverter.discharge_soc` (the value written
+to 3310) and `battery.min_soc` (the LP planning floor) at ≥ the register minimum** — set to 14 on
+2026-06-11, which restored writes immediately (100%→0% failure). The per-write error annotation in
+`writeHolding` (which logs the register *and value*) is what made this diagnosable.
+
+**Guard (`clampFloorSoc`, 2026-06-11):** every reg-3310 floor write (in `applySchedule`,
+`charge`/`discharge`/`idle`, `resetToDefault`) now passes its target through `clampFloorSoc`,
+which clamps to `[13, 100]` and logs a `console.warn` if the value was out of range. So a future
+out-of-range config value degrades gracefully to the nearest valid floor and fails loudly in the
+log instead of silently regressing to days of `exception 0`. Scoped to the SOC floor only — the
+peak-shaving (3307/3308) and TOU (3038) writes are not clamped.
+
 ### Transient error handling
 
 When `executePipeline` catches a Modbus error:
@@ -804,20 +831,25 @@ leave the last-written state and retry next cycle. (Caveat: sell mode is disable
 partial apply cannot leave Grid First TOU enabled. If sell is ever enabled, revisit whether
 a reset is needed when only the TOU write succeeded.)
 
-**Root-cause update (2026-06-11):** the `Modbus exception 0` failures were originally
-attributed to RS485 contention with the datalogger's cloud uplink. That was wrong — the
-signature is function-code-specific: same-socket FC04 reads succeed in the very cycle the
-FC16 write fails, and writes via the Growatt cloud path (ShinePhone) succeed throughout. The
-exception code `0` is not a valid Modbus exception — it is a malformed/desynced response
-frame from FC16 (preset-multiple) on this datalogger, not a device rejection.
+**Root cause — RESOLVED 2026-06-11: out-of-range floor value.** `Modbus exception 0` was the
+inverter **rejecting an illegal data value** — reg 3310's valid range is 13–100% and we were
+writing 8 (see the *Discharge-floor value* note under *Connection management*). The investigation
+chased and ruled out several wrong theories first, recorded here so they aren't re-tried:
+- **RS485 contention** — disproven: Growatt cloud-path (ShinePhone) writes succeed throughout,
+  and same-socket FC04 reads succeed in the cycle the write fails.
+- **Wrong function code** — disproven: the live `exception 1: Illegal function` from FC06 was
+  *itself* a mangled frame; `probe-write-failures.js` (service stopped) showed FC06 *and* FC16
+  both succeed. FC16 retained.
+- **Concurrent access** — disproven: the `withLock` mutex did not change the failure rate
+  (the probe "passed" only because it wrote no-op *in-range* values, never an out-of-range one).
+The tell was always in the logs once `writeHolding` annotated the failing **value** (`=8`): a
+value below the documented register minimum.
 
-**FC06 ruled out (2026-06-11):** switching the writes to FC06 (single-register) was tried as
-a fix; the datalogger rejects FC06 entirely with `Modbus exception 1: Illegal function`, so
-FC16 is mandatory. The diagnostic logging from that attempt was kept (it now names the
-failing register). **Root cause of the intermittent FC16 `exception 0` is still unresolved.**
-Next angles to investigate: stale-response/frame desync on the persistent socket (try a fresh
-connection or buffer flush before each write), a longer inter-command gap, or a higher
-`timeout_ms` so late responses aren't orphaned into the next request.
+Diagnostic tool: **`probe-write-failures.js`** — per-register/gap/connection fail-rate probe.
+Run with the service **stopped**. Caveat that bit us: it rewrites each register's *current*
+(in-range) value, so it cannot reproduce an out-of-range rejection — to test value limits, write
+*changing* values. Its fresh-connection group can end in `ECONNRESET` (datalogger dislikes rapid
+connect/close; keep the persistent socket). Reg 808 ("mirror") is not writable — 100% fail.
 
 ### Last-known SOC fallback
 

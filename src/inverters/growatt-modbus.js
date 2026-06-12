@@ -143,10 +143,31 @@ async function throttle() {
   lastCmd = Date.now();
 }
 
-// Wrap any driver call with automatic retry and reconnect.
+// Serialize every device operation behind a single promise-chain mutex.
+//
+// modbus-serial cannot multiplex one client: if two pipelines (e.g. executePipeline's
+// write and batteryPipeline's SOC read, or snapshotPipeline's block read) issue
+// requests on the shared socket concurrently, their response frames interleave and
+// desync — surfacing as bogus "Modbus exception 0/1" failures. The throttle only
+// *spaces* commands; it does not prevent concurrent callers. This lock guarantees
+// strictly one operation (incl. its full retry sequence) at a time, even across
+// independent cron jobs. Probe (probe-write-failures.js) confirmed writes succeed
+// ~97-100% when the process is the sole serial client.
+let opLock = Promise.resolve();
+function withLock(fn) {
+  const result = opLock.then(fn, fn); // run after the prior op settles (resolve or reject)
+  opLock = result.then(() => {}, () => {}); // keep the chain alive; don't poison it on failure
+  return result;
+}
+
+// Wrap any driver call: serialize it, then run with automatic retry and reconnect.
 // On each failure the client is destroyed so the next attempt gets a fresh
 // TCP connection (the datalogger sometimes recovers after a brief pause).
-async function withReconnect(fn) {
+function withReconnect(fn) {
+  return withLock(() => withRetry(fn));
+}
+
+async function withRetry(fn) {
   let lastErr;
   for (let attempt = 1; attempt <= MODBUS_RETRIES; attempt++) {
     try {
@@ -295,6 +316,21 @@ export async function getEnergyTotals(cfg) {
   }); // withReconnect
 }
 
+// LoadFirstStopSocSet (reg 3310) is firmware-limited to 13–100% on this inverter
+// (Growatt WIT Modbus protocol, confirmed live: writing <13 is rejected as an illegal
+// data value and surfaces as the misleading "Modbus exception 0"). Clamp every floor
+// target into range and warn, so an out-of-range config value degrades gracefully and
+// fails loudly in the log instead of silently bricking discharge dispatch.
+const FLOOR_SOC_MIN = 13;
+const FLOOR_SOC_MAX = 100;
+function clampFloorSoc(value, label) {
+  const clamped = Math.min(FLOOR_SOC_MAX, Math.max(FLOOR_SOC_MIN, value));
+  if (clamped !== value) {
+    console.warn(`[growatt-modbus] WARNING: floor SOC ${value}% (${label}) outside valid range [${FLOOR_SOC_MIN}–${FLOOR_SOC_MAX}] for reg 3310 — clamped to ${clamped}%. Check config (inverter.discharge_soc / battery.min_soc).`);
+  }
+  return clamped;
+}
+
 /**
  * Translate optimizer schedule to a single SOC buffer register write.
  *
@@ -335,6 +371,7 @@ export async function applySchedule(slots, cfg) {
     const plannedSoc = currentSlot.soc_start;
     targetSoc = plannedSoc != null ? Math.max(plannedSoc, dischargeSoc) : dischargeSoc;
   }
+  targetSoc = clampFloorSoc(targetSoc, `action=${action}`);
 
   // Enable TOU Grid First period when selling, disable otherwise.
   // The TOU period (reg 3038) is configured once via the Growatt app as Grid First 00:00–23:59.
@@ -374,7 +411,7 @@ export async function applySchedule(slots, cfg) {
  */
 export async function charge(cfg) {
   const state = await getState(cfg);
-  const target = cfg.charge_soc ?? 90;
+  const target = clampFloorSoc(cfg.charge_soc ?? 90, 'charge');
   console.log(`[growatt-modbus] charge: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}%`);
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
@@ -395,7 +432,7 @@ export async function charge(cfg) {
  */
 export async function discharge(cfg) {
   const state = await getState(cfg);
-  const target = cfg.discharge_soc ?? 20;
+  const target = clampFloorSoc(cfg.discharge_soc ?? 20, 'discharge');
   console.log(`[growatt-modbus] discharge: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}%`);
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
@@ -417,7 +454,7 @@ export async function discharge(cfg) {
 export async function idle(cfg) {
   const state = await getState(cfg);
   const dischargeSoc = cfg.discharge_soc ?? 20;
-  const target = Math.max(state.soc, dischargeSoc);
+  const target = clampFloorSoc(Math.max(state.soc, dischargeSoc), 'idle');
   console.log(`[growatt-modbus] idle: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}% (hold, floor=${dischargeSoc}%)`);
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);
@@ -458,7 +495,7 @@ export async function setPeakShavingTarget({ import_kw, export_kw }, cfg) {
  * @param {object} cfg — inverter config
  */
 export async function resetToDefault(cfg) {
-  const defaultSoc = cfg.discharge_soc ?? 20;
+  const defaultSoc = clampFloorSoc(cfg.discharge_soc ?? 20, 'reset');
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would reset TOU period 1=disabled, LoadFirstStopSoc=${defaultSoc}%`);
     return;
