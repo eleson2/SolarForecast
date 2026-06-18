@@ -41,9 +41,68 @@ severs the NIC and contributes to the overnight inverter Modbus timeouts (#2).
   `STANDBYIDLE` now `0x0`.
 - [x] Verify no further ID 42/107 events after the change — 0 sleep events in the 15 min
   after the change (was ~6/hour).
-- [ ] Note: this is a power-saving vs 24/7-reliability tradeoff — confirm the host is
-  meant to run the service continuously (it is, via NSSM). Long term this is solved by
-  the planned RPi migration (dedicated always-on device).
+
+### Revised policy 2026-06-17 — sleep RE-ENABLED with wake timers (Option 3)
+The host is a power-hungry gaming laptop, so running it awake 24/7 is wasteful.
+Re-examining the data showed sleep was **never** the cause of the big error spikes
+(those were the duplicate NSSM service, fixed Jun 3, and the out-of-range
+`discharge_soc=8` write rejection, fixed Jun 11). Crucially, the May 19–Jun 3 logs
+prove the service handled sleep gracefully: while sleeping **150–228×/day**, the Node
+process was **never restarted by NSSM** (0 `EADDRINUSE`/restart banners), **94–96 of 96**
+execute cycles still completed daily, and the Modbus error rate (1–8/day) matched the
+sleepless rate (~4/day). The old sleeps were only ~9 s each, so they rarely overlapped a
+15-min execute slot — for real power savings we need *longer* sleeps + deliberate wake.
+
+New setup (2026-06-17):
+- [x] `powercfg` on the active **Balanced** plan: `standby-timeout-ac/dc 4`,
+  `RTCWAKE` = 1 (all wake timers enabled, AC+DC), `hibernate-timeout 0`,
+  `monitor-timeout 2`. Verified in effect on SCHEME_CURRENT.
+
+> **RESOLVED 2026-06-17 — Razer Cortex was switching the active power plan.**
+> Symptom: `powercfg /change` settings kept "disappearing" because Cortex (System
+> Booster) flipped the active scheme between its own "Razer Cortex Power Plan" and
+> **Balanced**; settings only ever apply to the *active* plan. Fix: **user disabled
+> Boost in Razer Cortex**, after which the system stays on Balanced, and we re-applied
+> the sleep/wake settings there. Note Balanced previously had `RTCWAKE=2` ("important
+> wake timers only") which would have blocked our scheduled WakeToRun task — now set to
+> 1 (all wake timers). If you ever manually switch to another plan (e.g. High
+> Performance), re-apply these there too. Cortex still runs ~12 processes (minor
+> background draw) — optional cleanup later.
+> **ROOT CAUSE of the instant re-wake (found 2026-06-17, test pending).** After
+> disabling Boost, the laptop finally slept (4-min idle) but woke **1–2 s later, every
+> ~4.6 min** (`/lastwake` source = "Unknown"). Long-standing, predates the Razer mouse
+> (user confirmed) → not the mouse. The Realtek 2.5GbE NIC has **"Wake on pattern match"
+> = Enabled**, which wakes the host on ordinary inbound LAN broadcast/multicast traffic
+> (constant on a home LAN) → deterministic ~1–2 s wake. **Fix (run elevated, test
+> pending):** `Set-NetAdapterAdvancedProperty -Name "Ethernet 3" -DisplayName "Wake on
+> pattern match" -DisplayValue "Disabled"` (keeps Wake-on-Magic-Packet for deliberate
+> WOL). Then idle 5–6 min and confirm it stays asleep. If still waking, also disable
+> Wake on Magic Packet / `powercfg /devicedisablewake "Realtek Gaming 2.5GbE Family
+> Controller #2"`.
+> **REVISED 2026-06-18 — no-op wake task FAILED under real sleep; switched to "task runs
+> execute".** Once the host actually slept deeply (after disarming the Razer dongle, below),
+> the original no-op wake task woke the box but execute did NOT run: node-cron, frozen
+> during sleep, doesn't reliably fire in the brief post-wake window (Windows re-sleeps
+> ~2 min after a timer wake). Result: only 1 of ~10 cycles ran over 2 h (17:30 ok, then
+> 17:45–19:30 all missed); inverter sat on a stale slot. Wake-source log confirmed the task
+> *did* wake the box (`NT TASK\SolarForecast-WakeForExecute`), so waking works — the gap was
+> node-cron not running. **Fix:** the task now POSTs to `http://127.0.0.1:3000/battery/execute`
+> at each slot boundary (:00/:15/:30/:45 +30 s), which runs the cycle directly in the live
+> service (`runExecuteCycle` in `inverter-engine.js`, debounced vs the node-cron job).
+- [x] Registered the wake task (elevated run of `scripts/setup-wake-timer.ps1`):
+  `SolarForecast-WakeForExecute` — `WakeToRun=true`, runs as SYSTEM, every 15 min at
+  :00/:15/:30/:45 (+30 s); action POSTs `/battery/execute`. NOTE: runs as SYSTEM so a
+  non-elevated `Get-ScheduledTask`/`schtasks /query` can't see it — use an elevated shell
+  or `powercfg /waketimers`. **Re-run `setup-wake-timer.ps1` elevated to apply the new
+  action/trigger (the old no-op version must be replaced).**
+- [ ] Verify after an idle window: long sleeps occur (not 2 s), AND `app.log` shows an
+  execute cycle at every :00/:15/:30/:45 with no >15-min gaps, 0 restart banners, Modbus
+  errors in the normal band.
+- [ ] KNOWN GAP: only execute (+ its conditional re-optimize) is wake-driven. `battery`
+  (:30), `learn` (:00), `fetch`, `smooth` land on wake minutes so they run; **`consumption`
+  (:05) is skipped during sleep** (box asleep at :05). Non-fatal, but if it matters, align
+  the consumption cron to a wake minute or add a :05 wake. Long term the RPi migration
+  makes all of this moot.
 
 ---
 

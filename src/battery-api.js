@@ -23,6 +23,12 @@ export function setSellShadow(summary) {
   sellShadow = { summary, computed_at: new Date().toISOString() };
 }
 
+// Execute-cycle runner, registered by scheduler.js at startup. Kept as a registered
+// callback (rather than importing inverter-engine.js here) to avoid a circular import —
+// inverter-engine.js already imports setLpShadow/setSellShadow from this module.
+let executeRunner = null;
+export function registerExecuteRunner(fn) { executeRunner = fn; }
+
 /**
  * Format a Date as "YYYY-MM-DDTHH:MM" in configured timezone.
  */
@@ -349,6 +355,21 @@ router.post('/control/peak-shaving', async (req, res) => {
       dry_run: cfg.dry_run ?? false,
       note: 'Override active until next scheduled execute cycle (~15 min)',
     });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Trigger a full execute cycle on demand. Called by the WakeToRun scheduled task
+// after a sleep-wake (the host's node-cron can't be relied on to fire in the brief
+// post-resume window). Mounted under /battery, before the dashboard's basic-auth, so
+// it is reachable from localhost without credentials. The cycle itself is debounced
+// in inverter-engine.js, so a concurrent node-cron run is harmless.
+router.post('/execute', async (req, res) => {
+  if (!executeRunner) return res.status(503).json({ error: 'Execute runner not registered' });
+  try {
+    const result = await executeRunner({ source: 'wake-task' });
+    res.json({ ok: true, ...result });
   } catch (err) {
     res.status(502).json({ error: err.message });
   }

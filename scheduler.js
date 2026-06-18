@@ -8,18 +8,25 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { validateConfig } from './src/config-validator.js';
-import { 
-  fetchPipeline, 
-  batteryPipeline, 
-  snapshotPipeline, 
-  executePipeline 
+import {
+  fetchPipeline,
+  batteryPipeline,
+  snapshotPipeline,
+  executePipeline,
+  runExecuteCycle
 } from './src/inverter-engine.js';
 import { runConsumptionPipeline } from './src/consumption.js';
 import { runLearnPipeline } from './src/learner.js';
 import { runSmoothPipeline } from './src/smoother.js';
 import config from './config.js';
 import app from './src/api.js';
+import { registerExecuteRunner } from './src/battery-api.js';
 import log from './src/logger.js';
+
+// Let the WakeToRun scheduled task drive the execute cycle via POST /battery/execute
+// after a sleep-wake (node-cron can't be relied on to fire in the brief post-resume
+// window). Same function as the cron below; debounced so the two can't double-run.
+registerExecuteRunner(runExecuteCycle);
 
 // Validate config at startup
 try {
@@ -58,14 +65,9 @@ cron.schedule('30 * * * *', batteryPipeline);
 // Every 1 hour at :05: collect consumption from inverter
 cron.schedule('5 * * * *', runConsumptionPipeline);
 
-// Every 15 min: snapshot → execute
-cron.schedule('*/15 * * * *', async () => {
-  await snapshotPipeline();
-  if (!config.inverter.data_collection_only) {
-    const deviated = await executePipeline();
-    if (deviated) await batteryPipeline();
-  }
-});
+// Every 15 min: snapshot → execute. Fires when the host is awake; when it's asleep the
+// WakeToRun scheduled task wakes it and triggers the same cycle via POST /battery/execute.
+cron.schedule('*/15 * * * *', () => runExecuteCycle({ source: 'cron' }));
 
 // --- Config file watcher ---
 const configPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'config.js');

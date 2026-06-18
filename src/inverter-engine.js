@@ -27,6 +27,35 @@ export function setLastKnownSoc(soc) {
   lastKnownSoc = soc;
 }
 
+// Guards against the 15-min cycle running twice in quick succession when both the
+// node-cron job (fires when awake) and the wake-task HTTP trigger (fires after a
+// sleep-wake) land in the same window. Real cycles are 15 min apart, so a 4-min
+// debounce only ever suppresses the genuine duplicate.
+let lastExecuteCycleTs = 0;
+
+/**
+ * The full 15-min cycle: snapshot → execute → (conditional re-optimize on deviation).
+ * Driven by node-cron when the host is awake AND by the WakeToRun scheduled task
+ * (via POST /battery/execute) after a sleep-wake — whichever fires first wins.
+ * @param {{source?: string}} opts - 'cron' or 'wake-task', for logging.
+ */
+export async function runExecuteCycle({ source = 'cron' } = {}) {
+  const now = Date.now();
+  const sinceMs = now - lastExecuteCycleTs;
+  if (sinceMs < 4 * 60 * 1000) {
+    log.info('execute', `Execute cycle skipped — ran ${Math.round(sinceMs / 1000)}s ago (source=${source})`);
+    return { ran: false, skipped: true };
+  }
+  lastExecuteCycleTs = now;
+  log.info('execute', `Execute cycle start (source=${source})`);
+  await snapshotPipeline();
+  if (!config.inverter.data_collection_only) {
+    const deviated = await executePipeline();
+    if (deviated) await batteryPipeline();
+  }
+  return { ran: true, skipped: false };
+}
+
 /**
  * Weather fetch pipeline.
  */

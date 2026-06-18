@@ -512,6 +512,26 @@ Day-ahead prices publish at different times per market — configured via
 `config.price.day_ahead_hour` (UTC). The scheduler triggers 15 minutes after
 that hour, then re-optimizes hourly as actuals deviate from forecast.
 
+### Wake-driven execution (host power saving)
+
+The host (a desktop) is allowed to sleep to save power. node-cron, frozen during
+sleep, cannot be relied on to fire the 15-min execute in the brief window after a
+timer-wake. So the execute cycle is driven two ways:
+
+- **node-cron** (`*/15 * * * *`) — fires whenever the host is awake.
+- **A Windows `WakeToRun` scheduled task** (`SolarForecast-WakeForExecute`, set up by
+  `scripts/setup-wake-timer.ps1`) — wakes the host at each slot boundary and POSTs
+  `/battery/execute`, which runs the cycle in the live service.
+
+Both call `runExecuteCycle()` in `inverter-engine.js`, which is **debounced (~4 min)** so
+the two paths can't double-run. `POST /battery/execute` is registered via
+`registerExecuteRunner()` (a callback set by `scheduler.js`) to avoid a circular import.
+
+Only `execute` (+ its conditional re-optimize on SOC deviation) is wake-driven. `battery`
+(:30), `learn` (:00), `fetch`, and `smooth` happen to fall on wake minutes; **`consumption`
+(:05) is skipped while the host sleeps**. See `todo-ops.md`. Power-config details (sleep
+timeout, RTC wake, NIC "wake on pattern match", Razer device wakes) also live in `todo-ops.md`.
+
 ---
 
 ## Architecture
