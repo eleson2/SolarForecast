@@ -162,7 +162,8 @@
       "Bash(wc -l /tmp_schedule_dump.txt)",
       "Bash(head -5 /tmp_schedule_dump.txt)",
       "Bash(wc -l /tmp_snapshots_dump.txt)",
-      "Read(//c/Users/erlan/AppData/Local/Temp/claude/G--projects-SolarForecast/d17e1fcb-6e2b-47fe-a603-70cac28e7fc1/scratchpad/**)"
+      "Read(//c/Users/erlan/AppData/Local/Temp/claude/G--projects-SolarForecast/d17e1fcb-6e2b-47fe-a603-70cac28e7fc1/scratchpad/**)",
+      "PowerShell(node --test src/test/optimizer-lp.test.js 2>&1 | Select-Object -Last 15)"
     ]
   }
 }
