@@ -729,12 +729,14 @@ Instead of managing time segments (the cloud API approach), the Modbus driver us
 
 The `applySchedule()` function writes two registers each cycle:
 
-| Optimizer action | Reg 3038 (OperatingMode) | Reg 3310 (LoadFirstStopSoc) | Effect |
+| Optimizer action | Reg 3038 (TOU Period 1 / Grid First) | Reg 3310 (LoadFirstStopSoc) | Effect |
 |---|---|---|---|
-| `charge_grid` / `charge_solar` | 0 (Load First) | `charge_soc` (90%) | High floor → battery charges |
-| `discharge` | 0 (Load First) | `discharge_soc` (20%) | Low floor → battery discharges to house |
-| `sell` | 2 (Grid First) when `grid.sell_enabled` | `discharge_soc` (20%) | Grid First actively exports battery to grid |
-| `idle` | 0 (Load First) | Current SOC | Holds current level |
+| `charge_grid` | disabled | slot's planned `soc_end` (fallback: `charge_soc`) | Floor raised only to the LP's planned target for that slot — bounds both the grid energy drawn and how long the battery is withheld from serving house load |
+| `charge_solar` / `idle` | disabled | slot's planned `soc_start` (fallback: `discharge_soc`) | Holds current level; solar pushes SOC up naturally |
+| `discharge` | disabled | `discharge_soc` | Low floor → battery discharges to house |
+| `sell` | Grid First (24576) when `grid.sell_enabled` | `discharge_soc` | Grid First actively exports battery to grid |
+
+**Fix (2026-07-12):** `charge_grid` previously jumped straight to the flat `charge_soc` ceiling (e.g. 90%) regardless of how small the LP's planned top-up was. Because the inverter won't discharge below a floor it hasn't reached, this made it pull grid energy for the *entire* house load too — not just the top-up — until SOC actually hit 90%, even when the battery already held plenty of usable charge. Dispatch now targets the schedule row's `soc_end` instead, so the inverter stops drawing from grid once the LP's intended amount has landed and the battery resumes covering house load from its own reserve. The EV auto-charge override (`inverter-engine.js`, `driver.charge(cfg)`) is a separate code path and still targets the flat `charge_soc` — unaffected by this change.
 
 Reg 3038 (Grid First) is written as `2` for sell slots when `grid.sell_enabled: true`. Default is `0` (Load First) for all other actions. `resetToDefault` always restores reg 3038 = 0 to prevent Grid First mode being left active after a crash.
 

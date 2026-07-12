@@ -60,7 +60,7 @@ export default {
         fetch_interval_hours: 6
     },
     battery: {
-        capacity_kwh: 15.0,
+        capacity_kwh: 20.0,
         max_charge_w: 7500,
         max_discharge_w: 7500,
         efficiency: 0.90,

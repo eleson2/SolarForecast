@@ -359,8 +359,12 @@ export async function applySchedule(slots, cfg) {
 
   let targetSoc;
   if (action === 'charge_grid') {
-    // Force grid charging: set floor to max so inverter draws from grid to fill battery.
-    targetSoc = chargeSoc;
+    // Charge only up to the LP's planned target for this slot (soc_end), not a
+    // blanket charge_soc ceiling. Jumping straight to charge_soc (e.g. 90%) makes
+    // the inverter draw grid energy — for both the top-up and house load, since it
+    // won't discharge below a floor it hasn't reached — far past what the plan
+    // called for. Falls back to chargeSoc if the schedule row has no soc_end.
+    targetSoc = currentSlot.soc_end ?? chargeSoc;
   } else if (action === 'discharge' || action === 'sell') {
     // Allow discharging down to the minimum floor.
     targetSoc = dischargeSoc;
