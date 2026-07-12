@@ -191,6 +191,12 @@ export default {
         // SOC buffer control — holding register 3310 (LoadFirstStopSocSet / reserved SOC for peak shaving)
         // Inverter stays in load-first mode; this register sets the discharge floor.
         charge_soc: 90,                           // SOC floor when charging (high = battery fills up)
+        // Percentage points BELOW the planned/current SOC that hold actions (idle,
+        // charge_solar) set the floor to. A floor written exactly at SOC blocks all
+        // discharge, so load transients above solar (cloud passing, appliance spike)
+        // get served from the grid despite a charged battery. 4-5 lets the battery
+        // absorb transients while preserving the bulk of the stored energy.
+        hold_soc_buffer: 5,
         discharge_soc: 14,                         // SOC floor when discharging (low = battery empties); matches battery.min_soc — grid-charge gate protects min_soc + grid_charge_floor_buffer_soc (13%) above this
 
         // --- Growatt cloud API settings (used when brand = 'growatt') ---

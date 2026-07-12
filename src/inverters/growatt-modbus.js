@@ -369,11 +369,16 @@ export async function applySchedule(slots, cfg) {
     // Allow discharging down to the minimum floor.
     targetSoc = dischargeSoc;
   } else {
-    // idle / charge_solar: hold the battery at the optimizer's planned SOC for this slot.
-    // This preserves charge accumulated during a cheap window for a later discharge peak.
-    // charge_solar uses the same hold — solar will push SOC up naturally from here.
+    // idle / charge_solar: hold near the optimizer's planned SOC for this slot,
+    // keeping the floor hold_soc_buffer points below it. A floor written exactly
+    // at SOC blocks all discharge, so every load transient above solar (passing
+    // cloud, appliance spike) would be served from the grid despite a charged
+    // battery. The small gap lets the battery absorb transients while still
+    // preserving the bulk of the stored energy for the later discharge peak.
+    // charge_solar uses the same hold — solar pushes SOC up naturally from here.
+    const holdBuffer = cfg.hold_soc_buffer ?? 5;
     const plannedSoc = currentSlot.soc_start;
-    targetSoc = plannedSoc != null ? Math.max(plannedSoc, dischargeSoc) : dischargeSoc;
+    targetSoc = plannedSoc != null ? Math.max(plannedSoc - holdBuffer, dischargeSoc) : dischargeSoc;
   }
   targetSoc = clampFloorSoc(targetSoc, `action=${action}`);
 
@@ -450,15 +455,17 @@ export async function discharge(cfg) {
 }
 
 /**
- * Hold battery at current SOC: set discharge floor = current SOC.
- * The battery can neither charge above nor discharge below its present level.
+ * Hold battery near current SOC: set discharge floor = current SOC − hold_soc_buffer.
+ * The small gap lets the battery cover load transients instead of the grid while
+ * still preserving the bulk of the stored energy.
  * @param {object} cfg — inverter config
  * @returns {Promise<{ soc: number, target: number }>}
  */
 export async function idle(cfg) {
   const state = await getState(cfg);
   const dischargeSoc = cfg.discharge_soc ?? 20;
-  const target = clampFloorSoc(Math.max(state.soc, dischargeSoc), 'idle');
+  const holdBuffer = cfg.hold_soc_buffer ?? 5;
+  const target = clampFloorSoc(Math.max(state.soc - holdBuffer, dischargeSoc), 'idle');
   console.log(`[growatt-modbus] idle: SOC=${state.soc}% → setting LoadFirstStopSoc=${target}% (hold, floor=${dischargeSoc}%)`);
   if (cfg.dry_run) {
     console.log(`[growatt-modbus] DRY-RUN: would set LoadFirstStopSoc=${target}%`);

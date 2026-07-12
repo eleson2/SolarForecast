@@ -163,7 +163,9 @@
       "Bash(head -5 /tmp_schedule_dump.txt)",
       "Bash(wc -l /tmp_snapshots_dump.txt)",
       "Read(//c/Users/erlan/AppData/Local/Temp/claude/G--projects-SolarForecast/d17e1fcb-6e2b-47fe-a603-70cac28e7fc1/scratchpad/**)",
-      "PowerShell(node --test src/test/optimizer-lp.test.js 2>&1 | Select-Object -Last 15)"
+      "PowerShell(node --test src/test/optimizer-lp.test.js 2>&1 | Select-Object -Last 15)",
+      "PowerShell(node --test src/test/ 2>&1 | Select-Object -Last 8)",
+      "PowerShell(node -e \"import\\('./config.js'\\).then\\(m => console.log\\('config OK, hold_soc_buffer =', m.default.inverter.hold_soc_buffer\\)\\)\")"
     ]
   }
 }

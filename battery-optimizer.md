@@ -732,7 +732,7 @@ The `applySchedule()` function writes two registers each cycle:
 | Optimizer action | Reg 3038 (TOU Period 1 / Grid First) | Reg 3310 (LoadFirstStopSoc) | Effect |
 |---|---|---|---|
 | `charge_grid` | disabled | slot's planned `soc_end` (fallback: `charge_soc`) | Floor raised only to the LP's planned target for that slot — bounds both the grid energy drawn and how long the battery is withheld from serving house load |
-| `charge_solar` / `idle` | disabled | slot's planned `soc_start` (fallback: `discharge_soc`) | Holds current level; solar pushes SOC up naturally |
+| `charge_solar` / `idle` | disabled | planned `soc_start` − `hold_soc_buffer` (default 5; fallback: `discharge_soc`) | Holds near current level with a small discharge margin so load transients above solar are served from the battery, not the grid; solar pushes SOC up naturally |
 | `discharge` | disabled | `discharge_soc` | Low floor → battery discharges to house |
 | `sell` | Grid First (24576) when `grid.sell_enabled` | `discharge_soc` | Grid First actively exports battery to grid |
 
@@ -793,6 +793,7 @@ inverter: {
     dry_run: true,              // true = log only, false = write registers
     charge_soc: 95,             // SOC target for charge actions
     discharge_soc: 13,          // SOC floor for discharge actions
+    hold_soc_buffer: 5,         // hold actions set floor this many points below planned/current SOC
 },
 ```
 
