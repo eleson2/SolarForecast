@@ -17,7 +17,9 @@ const DAYTIME_START = 8;   // first hour covered by the temperature model (inclu
 const DAYTIME_END   = 18;  // last hour covered by the temperature model (inclusive)
 
 /**
- * Fetch today's and yesterday's hourly temperatures from Open-Meteo.
+ * Fetch hourly temperatures from Open-Meteo: 2 days back + 2 days ahead.
+ * The 2-day history gives the summer-mode state machine enough runway to settle
+ * (entering needs 3 h above threshold, exiting needs 12 h below).
  * Returns Map of "YYYY-MM-DDTHH:00" → temperature_2m (°C).
  */
 async function fetchTemperatures() {
@@ -25,7 +27,7 @@ async function fetchTemperatures() {
   const url = `https://api.open-meteo.com/v1/forecast`
     + `?latitude=${lat}&longitude=${lon}`
     + `&hourly=temperature_2m`
-    + `&past_days=1&forecast_days=2`
+    + `&past_days=2&forecast_days=2`
     + `&timezone=${encodeURIComponent(timezone)}`;
 
   const res = await fetch(url);
@@ -38,6 +40,49 @@ async function fetchTemperatures() {
     temps.set(data.hourly.time[i], data.hourly.temperature_2m[i]);
   }
   return temps;
+}
+
+/**
+ * Simulate the heat pump summer-mode state machine over hourly temperatures.
+ *
+ * Enter: temperature above summer_mode_temp_c for summer_mode_enter_hours
+ * consecutive hours → heat pump off, cooling system on (cooling_watts).
+ * Exit: temperature below the threshold for summer_mode_exit_hours consecutive
+ * hours → cooling system off. A brief dip above/below resets the other counter,
+ * matching the hysteresis the heat pump itself applies.
+ *
+ * The walk starts 2 days in the past (see fetchTemperatures) with summer mode
+ * off, giving the state machine enough history to settle before the forecast
+ * window begins.
+ *
+ * @param {Map<string, number>} temps - "YYYY-MM-DDTHH:00" → °C, from fetchTemperatures
+ * @returns {Set<string>} hour timestamps during which the cooling system runs
+ */
+export function computeCoolingHours(temps) {
+  const cool = config.consumption?.cooling;
+  const on = new Set();
+  if (!cool?.enabled || !temps) return on;
+
+  const threshold = cool.summer_mode_temp_c ?? 17;
+  const enterH    = cool.summer_mode_enter_hours ?? 3;
+  const exitH     = cool.summer_mode_exit_hours ?? 12;
+
+  let summerMode = false;
+  let hoursAbove = 0;
+  let hoursBelow = 0;
+
+  for (const ts of [...temps.keys()].sort()) {
+    const t = temps.get(ts);
+    if (t == null) continue;
+    if (t > threshold) { hoursAbove++; hoursBelow = 0; }
+    else               { hoursBelow++; hoursAbove = 0; }
+
+    if (!summerMode && hoursAbove >= enterH) summerMode = true;
+    if (summerMode && hoursBelow >= exitH)   summerMode = false;
+
+    if (summerMode) on.add(ts);
+  }
+  return on;
 }
 
 /**
@@ -77,6 +122,16 @@ export async function estimateConsumption(windowStart = null) {
 
   const estimates = [];
 
+  // Cooling adjustment (heat pump summer mode): coolingHours holds every hour —
+  // past and forecast — during which the cooling system is expected to run.
+  // Forecast hours in the set get +cooling_watts; when the base estimate is
+  // yesterday's reading, yesterday's own cooling hours are subtracted first so
+  // the load isn't counted twice.
+  let coolingHours = new Set();
+  const coolingW = config.consumption?.cooling?.enabled
+    ? (config.consumption.cooling.cooling_watts ?? 400)
+    : 0;
+
   if (config.consumption.source === 'yesterday') {
     const yesterdayData = getConsumptionForRange(
       `${yesterdayDateStr}T00:00`,
@@ -89,6 +144,12 @@ export async function estimateConsumption(windowStart = null) {
     } catch (err) {
       console.log(`[consumption] Temperature fetch failed, skipping correction: ${err.message}`);
       temps = null;
+    }
+
+    if (coolingW > 0 && temps) {
+      coolingHours = computeCoolingHours(temps);
+      const forecastOn = windowHours.filter(({ ts }) => coolingHours.has(ts)).length;
+      console.log(`[consumption] Summer-mode cooling: ON for ${forecastOn}/${windowHours.length} forecast hours (+${coolingW}W each)`);
     }
 
     // Build lookup: hour-of-day (0-23) → yesterday's { w, temp }
@@ -105,8 +166,13 @@ export async function estimateConsumption(windowStart = null) {
 
       for (const { ts: hourTs, hourOfDay: h } of windowHours) {
         const forecastTemp = temps?.get(hourTs) ?? null;
+        const hStr = String(h).padStart(2, '0');
+        const yesterdayHourTs = `${yesterdayDateStr}T${hStr}:00`;
+        const coolingForecastW = coolingHours.has(hourTs) ? coolingW : 0;
 
         // --- Path 1: learned regression model (daytime hours only) ---
+        // The regression is fitted on historical readings that already contain any
+        // cooling load at those temperatures, so no explicit adjustment is added.
         if (h >= DAYTIME_START && h <= DAYTIME_END && daytimeModel && forecastTemp !== null) {
           const predicted = Math.round(daytimeModel.slope * forecastTemp + daytimeModel.intercept);
           const clamped = Math.max(100, Math.min(config.consumption.flat_watts * 3, predicted));
@@ -118,7 +184,7 @@ export async function estimateConsumption(windowStart = null) {
         // --- Path 2: yesterday's value + temperature correction ---
         const yesterdayEntry = yesterdayByHour.get(h);
         if (!yesterdayEntry) {
-          estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
+          estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts + coolingForecastW });
           continue;
         }
 
@@ -127,14 +193,12 @@ export async function estimateConsumption(windowStart = null) {
         // to over-discharge. Fall back to flat_watts instead.
         const maxHouseW = config.consumption?.max_house_w ?? Infinity;
         if (maxHouseW < Infinity && yesterdayEntry.w > maxHouseW) {
-          estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
+          estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts + coolingForecastW });
           continue;
         }
 
         let factor = 1.0;
         if (temps && forecastTemp !== null) {
-          const hStr = String(h).padStart(2, '0');
-          const yesterdayHourTs = `${yesterdayDateStr}T${hStr}:00`;
           const yesterdayTemp = yesterdayEntry.temp ?? temps.get(yesterdayHourTs);
           if (yesterdayTemp != null) {
             const tempDiff = forecastTemp - yesterdayTemp;
@@ -146,9 +210,14 @@ export async function estimateConsumption(windowStart = null) {
           }
         }
 
+        // Cooling delta vs yesterday: yesterday's reading already includes any
+        // cooling that ran then, so only the state CHANGE is applied — cooler
+        // newly on adds cooling_watts, cooler newly off removes it.
+        const coolingYesterdayW = coolingHours.has(yesterdayHourTs) ? coolingW : 0;
         estimates.push({
           hour_ts: hourTs,
-          consumption_w: Math.round(yesterdayEntry.w * factor),
+          consumption_w: Math.max(100,
+            Math.round(yesterdayEntry.w * factor) + coolingForecastW - coolingYesterdayW),
         });
         yesterdayHours++;
       }
@@ -163,9 +232,11 @@ export async function estimateConsumption(windowStart = null) {
     console.log('[consumption] No yesterday data, falling back to flat estimate');
   }
 
-  // Fallback: flat watts for each window hour
+  // Fallback: flat watts for each window hour (plus cooling load when known —
+  // coolingHours is only populated when the 'yesterday' path fetched temperatures)
   for (const { ts: hourTs } of windowHours) {
-    estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts });
+    const coolingForecastW = coolingHours.has(hourTs) ? coolingW : 0;
+    estimates.push({ hour_ts: hourTs, consumption_w: config.consumption.flat_watts + coolingForecastW });
   }
   console.log(`[consumption] Using flat estimate: ${config.consumption.flat_watts}W`);
   return estimates;

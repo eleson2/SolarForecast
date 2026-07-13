@@ -324,6 +324,8 @@ export async function getEnergyTotals(cfg) {
 const FLOOR_SOC_MIN = 13;
 const FLOOR_SOC_MAX = 100;
 function clampFloorSoc(value, label) {
+  // Reg 3310 takes whole percent — planned SOC values can be fractional (e.g. 51.4).
+  value = Math.round(value);
   const clamped = Math.min(FLOOR_SOC_MAX, Math.max(FLOOR_SOC_MIN, value));
   if (clamped !== value) {
     console.warn(`[growatt-modbus] WARNING: floor SOC ${value}% (${label}) outside valid range [${FLOOR_SOC_MIN}–${FLOOR_SOC_MAX}] for reg 3310 — clamped to ${clamped}%. Check config (inverter.discharge_soc / battery.min_soc).`);
@@ -339,9 +341,11 @@ function clampFloorSoc(value, label) {
  *
  * @param {Array<{ slot_ts: string, action: string }>} slots
  * @param {object} cfg — inverter config
+ * @param {number|null} actualSoc — live SOC reading (%) from the same execute cycle,
+ *   used to cap hold floors so a stale plan can never command a grid top-up
  * @returns {Promise<{ applied: number, skipped: number }>}
  */
-export async function applySchedule(slots, cfg) {
+export async function applySchedule(slots, cfg, actualSoc = null) {
   if (!slots.length) return { applied: 0, skipped: 0 };
 
   // Find current slot (latest slot whose timestamp is <= now).
@@ -376,9 +380,18 @@ export async function applySchedule(slots, cfg) {
     // battery. The small gap lets the battery absorb transients while still
     // preserving the bulk of the stored energy for the later discharge peak.
     // charge_solar uses the same hold — solar pushes SOC up naturally from here.
+    //
+    // The hold base is the LOWER of planned and actual SOC. When actual SOC has
+    // drifted below the plan (under-forecast night load, stale schedule), a floor
+    // derived from the planned value can land ABOVE the real SOC — and the Growatt
+    // then grid-charges up to the floor, turning a "hold" into an unplanned grid
+    // import. A hold must never charge; only an explicit charge_grid action may.
     const holdBuffer = cfg.hold_soc_buffer ?? 5;
     const plannedSoc = currentSlot.soc_start;
-    targetSoc = plannedSoc != null ? Math.max(plannedSoc - holdBuffer, dischargeSoc) : dischargeSoc;
+    const holdBase = (plannedSoc != null && actualSoc != null)
+      ? Math.min(plannedSoc, actualSoc)
+      : (plannedSoc ?? actualSoc);
+    targetSoc = holdBase != null ? Math.max(holdBase - holdBuffer, dischargeSoc) : dischargeSoc;
   }
   targetSoc = clampFloorSoc(targetSoc, `action=${action}`);
 

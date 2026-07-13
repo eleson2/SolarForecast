@@ -33,6 +33,13 @@ export function setLastKnownSoc(soc) {
 // debounce only ever suppresses the genuine duplicate.
 let lastExecuteCycleTs = 0;
 
+// Timestamp of the last successful battery plan (schedule written to DB).
+// The hourly node-cron replan fires at :30:00 sharp — while the host sleeps between
+// 15-min wake-task windows, that tick is missed and the plan silently goes stale.
+// A stale plan carries soc_start values that no longer match reality, so the
+// execute cycle replans whenever the plan is older than battery.max_plan_age_min.
+let lastPlanTs = 0;
+
 /**
  * The full 15-min cycle: snapshot → execute → (conditional re-optimize on deviation).
  * Driven by node-cron when the host is awake AND by the WakeToRun scheduled task
@@ -51,7 +58,13 @@ export async function runExecuteCycle({ source = 'cron' } = {}) {
   await snapshotPipeline();
   if (!config.inverter.data_collection_only) {
     const deviated = await executePipeline();
-    if (deviated) await batteryPipeline();
+    const maxPlanAgeMin = config.battery?.max_plan_age_min ?? 75;
+    const planAgeMin = Math.round((Date.now() - lastPlanTs) / 60_000);
+    const planStale = maxPlanAgeMin > 0 && planAgeMin > maxPlanAgeMin;
+    if (planStale && !deviated) {
+      log.info('battery', `Plan is ${lastPlanTs === 0 ? 'missing' : `${planAgeMin} min old`} (max ${maxPlanAgeMin}) — replanning`);
+    }
+    if (deviated || planStale) await batteryPipeline();
   }
   return { ran: true, skipped: false };
 }
@@ -173,6 +186,7 @@ export async function batteryPipeline() {
     }
 
     log.info('battery', 'Battery optimizer pipeline complete');
+    lastPlanTs = Date.now();
     recordPipelineRun('battery');
   } catch (err) {
     log.error('battery', 'Battery optimizer error', err);
@@ -284,7 +298,7 @@ export async function executePipeline() {
       triggerReplan = true;
     }
 
-    const result = await driver.applySchedule(slots, cfg);
+    const result = await driver.applySchedule(slots, cfg, state.soc);
     log.info('execute', `Inverter execution done: ${result.applied} applied, ${result.skipped} skipped`);
 
     // Apply peak shaving limits

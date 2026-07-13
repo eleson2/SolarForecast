@@ -122,6 +122,12 @@ export default {
         // (next-day prices arrive ~13:00), so before then it naturally runs shorter.
         // Only affects batteryPipeline; dispatch/snapshot still use the current slot.
         optimizer_window_hours: 48,
+        // Maximum age (minutes) of the battery plan before the 15-min execute cycle
+        // forces a re-optimization. The hourly :30 replan cron misses its tick while
+        // the host sleeps between wake-task windows, so without this guard the plan
+        // can go stale for many hours and its soc_start values drift away from
+        // reality. 75 = one hourly cycle plus slack. 0 disables the guard.
+        max_plan_age_min: 75,
     },
     grid: {
         // Set sell_enabled: true to allow the optimizer to plan battery→grid export slots.
@@ -151,6 +157,24 @@ export default {
         // Rule of thumb: peak heating load + all appliances, but not the EV charger.
         // Example: 5000 covers a well-heated Swedish home; set to 0 to disable.
         max_house_w: 5000,
+        // Heat pump summer mode + cooling system model.
+        // After summer_mode_enter_hours consecutive hours with outdoor temperature
+        // above summer_mode_temp_c, the heat pump enters summer mode: it shuts
+        // itself off and switches on a cooling system drawing cooling_watts.
+        // It exits summer mode (cooler off) once the temperature has stayed below
+        // summer_mode_temp_c for summer_mode_exit_hours consecutive hours.
+        // The consumption forecast simulates this state machine over Open-Meteo
+        // hourly temperatures (2 days back + 2 days ahead) and adds/removes
+        // cooling_watts per hour relative to what yesterday's readings already
+        // contained — so unexpected night-time cooling load no longer surprises
+        // the optimizer into emergency behaviour.
+        cooling: {
+            enabled: true,
+            summer_mode_temp_c: 17,     // °C — summer mode threshold
+            summer_mode_enter_hours: 3, // consecutive hours above threshold to enter
+            summer_mode_exit_hours: 12, // consecutive hours below threshold to exit
+            cooling_watts: 400,         // cooling system draw while in summer mode (W)
+        },
     },
     ev: {
         // Set enabled: true if an EV charges at this location via a supplier-controlled charger.

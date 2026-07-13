@@ -60,6 +60,9 @@ discharge when prices peak, and sell capacity back to the grid when profitable.
 | Optimizer horizon (rolling window) | Done | `timeutils.js` `currentWindow(tz, horizonHours)` + `config.battery.optimizer_window_hours` (default 48). batteryPipeline optimises over a rolling 48 h window (was hardcoded 24 h) so it can see the upcoming night when planning daytime charging and fill the battery during cheap hours instead of discovering the need the next morning. Span is naturally capped by published price slots (next-day prices arrive ~13:00), so it runs shorter before then. Dispatch/snapshot still use the current slot (default 24 h). |
 | Grid-charge floor-protection gate | Done | `optimizer-lp.js`: `config.battery.grid_charge_floor_buffer_soc` (default 5; `null` disables). Margin SOC = `min_soc + buffer` (currently 14 + 5 = 19%). Before building the LP bounds, simulates a **baseline no-grid-charge SOC trajectory** (solar surplus charges, consumption deficit discharges, no bottom clamp). **Daylight slots (`solar_watts ≥ MIN_SOLAR_W`) are always closed** — grid-charging the battery while the sun is up is arbitrage/hedging by definition: solar charges it for free, and when solar + battery fall short the house imports directly at spot price instead of pre-buying through the battery (round-trip loss included). For each pre-sunrise slot, if the battery can bridge to the next **solar onset (sunrise)** while staying ≥ the margin, the slot's `cg_t` upper bound is **zeroed** — no grid charge. Grid charging is permitted only pre-sunrise, and only where a margin breach is otherwise unavoidable before sunrise — floor protection only, matching the `config.js` comment. Robust to solar under-forecast because the pre-sunrise bridge carries ~zero solar. Independent of (and stacks with) `charge_grid_max_buy_price`. **History:** the gate originally left daylight slots unconditionally open "so the LP decides on normal economics," which let it arbitrage-buy on cheap daytime slots even with ample SOC headroom (2026-07-12 09:45: grid charge at 40% SOC on the day's cheapest slot). Closed 2026-07-12. The EV auto-charge override (`ev.auto_charge_grid`) is a separate path and still charges from grid during the day when an EV is detected. |
 | Stranded SOC / forward-feasibility ceiling | Done | `optimizer-lp.js`: pre-computes `maxFutureDisWh[t]` — the maximum Wh dischargeable from slot `t` to end of window (consumption-bounded). Adds slack variable `esp_t = max(0, s_t − (minSoc + maxFutureDisWh[t]))` with a soft penalty in the objective for non-solar slots where the battery holds more charge than it can ever deploy. Prevents the LP from hoarding charge overnight when morning/evening consumption is too modest to absorb it all. Config: `config.battery.stranded_soc_penalty` (default 0.20 = 20% of slot buy-price per Wh above ceiling; 0 disables). Tune upward if overnight idle persists with obvious spare capacity; tune downward if it discharges too aggressively before a late price peak. |
+| Hold-floor actual-SOC clamp | Done | `growatt-modbus.js` `applySchedule(slots, cfg, actualSoc)`: for `idle`/`charge_solar` the hold floor is now `min(planned soc_start, actual SOC) − hold_soc_buffer`. Previously the floor came from the *planned* `soc_start` alone — when actual SOC drifted below the plan (under-forecast night load + stale schedule), the floor could land **above** actual SOC and the Growatt grid-charged up to it, turning a "hold" into an unplanned grid import (2026-07-13 ~08:00 local: floor 46% vs actual 44–45% → ~1.3 kWh imported at morning peak prices). A hold must never charge; only an explicit `charge_grid` action may. `executePipeline` passes the live SOC it just read. |
+| Stale-plan replan guard | Done | `inverter-engine.js` `runExecuteCycle`: replans via `batteryPipeline()` when the last successful plan is older than `config.battery.max_plan_age_min` (default 75; 0 disables). The hourly `:30` replan cron fires at `:30:00` sharp, but the sleeping host only wakes at `:xx:31` for the wake-task — the tick is missed every hour and the plan silently went stale (observed: plan from 22:56 still dispatching at 08:00 next day). Complements the SOC-deviation guard, which only fires at ≥ `soc_deviation_threshold` points of drift. |
+| Summer-mode cooling load model | Done | `config.consumption.cooling` + `consumption.js` `computeCoolingHours()`: simulates the heat pump's summer-mode state machine over Open-Meteo hourly temperatures (2 days back + 2 ahead). Enter after `summer_mode_enter_hours` (3) consecutive hours above `summer_mode_temp_c` (17 °C) → heat pump off, cooling system on (`cooling_watts`, 400 W). Exit after `summer_mode_exit_hours` (12) consecutive hours below. `estimateConsumption` adds the cooling load **as a delta vs yesterday** on the yesterday path (yesterday's readings already contain yesterday's cooling), and adds it outright on flat-watts fallbacks. Daytime regression path unchanged (fitted on readings that already embed cooling at those temperatures). Motivated by 2026-07-13: overnight cooling ran ~200–400 W above forecast, SOC drifted 8–10 points below plan and exposed the hold-floor bug above. |
 
 ---
 
@@ -276,6 +279,33 @@ from the regression anyway.
 If the model has fewer than 50 samples or the DB has no yesterday data, falls back
 to `config.consumption.flat_watts` as a flat estimate.
 
+**Summer-mode cooling load — `config.consumption.cooling`**
+
+The heat pump enters *summer mode* after `summer_mode_enter_hours` (default 3)
+consecutive hours with outdoor temperature above `summer_mode_temp_c` (default 17 °C):
+it shuts itself off and switches on a cooling system drawing `cooling_watts`
+(default 400 W). It exits summer mode — cooler off — once the temperature has stayed
+below the threshold for `summer_mode_exit_hours` (default 12) consecutive hours.
+
+`computeCoolingHours()` simulates this state machine over Open-Meteo hourly
+temperatures (2 days back + 2 days ahead, same fetch as the temperature correction)
+and returns the set of hours during which the cooler runs. `estimateConsumption`
+then applies it per forecast hour:
+
+- **Yesterday path:** adds `cooling_watts × (coolingToday − coolingYesterday)` — a
+  delta, because yesterday's reading already contains yesterday's cooling load.
+  Handles both directions: heat wave starting (yesterday off, today on → +400 W)
+  and cooling ending (−400 W).
+- **Flat-watts fallbacks:** adds `cooling_watts` outright when the forecast hour is
+  a cooling hour (`flat_watts` represents the house baseline without cooling).
+- **Daytime regression path:** unchanged — the regression is fitted on readings
+  that already embed cooling at those temperatures.
+
+This keeps the overnight consumption forecast honest during warm spells, so the
+optimizer's SOC plan doesn't drift below reality and the battery is planned to last
+until solar production takes over. Set `cooling.enabled: false` for houses without
+a summer-mode cooler.
+
 ### 4. Battery state
 From inverter API or manual config:
 
@@ -320,6 +350,11 @@ export default {
         // SOC deviation guard — if actual SOC falls this many percentage points below the
         // optimizer's planned soc_start for the current slot, a full replan is triggered.
         soc_deviation_threshold: 8,
+
+        // Stale-plan guard — the 15-min execute cycle forces a replan when the last
+        // successful battery plan is older than this (minutes). Covers the hourly :30
+        // replan cron being missed while the host sleeps. 0 disables.
+        max_plan_age_min: 75,
     },
 ```
 
@@ -358,6 +393,14 @@ The config watcher (`scheduler.js`) restarts the service automatically after the
         // preventing EV sessions from corrupting the consumption model slope.
         // Rule of thumb: peak heating load + all appliances, but not the EV charger.
         max_house_w: 5000,
+        // Heat pump summer mode + cooling system (see "Summer-mode cooling load")
+        cooling: {
+            enabled: true,
+            summer_mode_temp_c: 17,     // °C threshold
+            summer_mode_enter_hours: 3, // consecutive hours above to enter summer mode
+            summer_mode_exit_hours: 12, // consecutive hours below to exit
+            cooling_watts: 400,         // cooling system draw while in summer mode (W)
+        },
     },
     price: {
         source: 'elprisetjust',     // 'elprisetjust' (Nordics) or 'awattar' (DE/AT)
@@ -528,9 +571,15 @@ the two paths can't double-run. `POST /battery/execute` is registered via
 `registerExecuteRunner()` (a callback set by `scheduler.js`) to avoid a circular import.
 
 Only `execute` (+ its conditional re-optimize on SOC deviation) is wake-driven. `battery`
-(:30), `learn` (:00), `fetch`, and `smooth` happen to fall on wake minutes; **`consumption`
-(:05) is skipped while the host sleeps**. See `todo-ops.md`. Power-config details (sleep
-timeout, RTC wake, NIC "wake on pattern match", Razer device wakes) also live in `todo-ops.md`.
+(:30), `learn` (:00), `fetch`, and `smooth` nominally fall on wake minutes, but **node-cron
+ticks at `:xx:00` while the wake-task only has the host awake from ~`:xx:31` — so these
+crons are in practice missed every cycle while the host sleeps** (observed 2026-07-13: no
+battery replan between 22:56 and the morning). The stale-plan guard in `runExecuteCycle`
+compensates for `battery`: if the last successful plan is older than
+`config.battery.max_plan_age_min` (default 75 min), the execute cycle triggers
+`batteryPipeline()` itself. **`consumption` (:05) is still skipped while the host sleeps**.
+See `todo-ops.md`. Power-config details (sleep timeout, RTC wake, NIC "wake on pattern
+match", Razer device wakes) also live in `todo-ops.md`.
 
 ---
 
@@ -732,7 +781,7 @@ The `applySchedule()` function writes two registers each cycle:
 | Optimizer action | Reg 3038 (TOU Period 1 / Grid First) | Reg 3310 (LoadFirstStopSoc) | Effect |
 |---|---|---|---|
 | `charge_grid` | disabled | slot's planned `soc_end` (fallback: `charge_soc`) | Floor raised only to the LP's planned target for that slot — bounds both the grid energy drawn and how long the battery is withheld from serving house load |
-| `charge_solar` / `idle` | disabled | planned `soc_start` − `hold_soc_buffer` (default 5; fallback: `discharge_soc`) | Holds near current level with a small discharge margin so load transients above solar are served from the battery, not the grid; solar pushes SOC up naturally |
+| `charge_solar` / `idle` | disabled | `min(planned soc_start, actual SOC)` − `hold_soc_buffer` (default 5; fallback: `discharge_soc`) | Holds near current level with a small discharge margin so load transients above solar are served from the battery, not the grid; solar pushes SOC up naturally. Clamped to actual SOC because a floor above the real level makes the inverter grid-charge up to it — a hold must never import |
 | `discharge` | disabled | `discharge_soc` | Low floor → battery discharges to house |
 | `sell` | Grid First (24576) when `grid.sell_enabled` | `discharge_soc` | Grid First actively exports battery to grid |
 
